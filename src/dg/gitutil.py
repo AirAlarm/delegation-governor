@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from . import config
 
@@ -67,12 +68,46 @@ def changed_files(worktree: str) -> list[str]:
     return [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
 
 
-def remove_worktree(repo: str, worktree: str, branch: str | None = None) -> dict[str, bool]:
-    res = {"worktreeRemoved": False, "branchDeleted": False}
+def is_merged(repo: str, branch: str) -> bool:
+    """Is every commit on `branch` already reachable from HEAD?"""
+    return git(repo, "merge-base", "--is-ancestor", branch, "HEAD",
+               check=False).returncode == 0
+
+
+def snapshot(worktree: str, message: str) -> bool:
+    """Commit whatever is loose in the worktree onto its branch. True if it did.
+
+    A worker leaves its output uncommitted, so removing the worktree would
+    throw it away. Committing first means the branch is a durable copy.
+    """
+    if not changed_files(worktree):
+        return False
+    git(worktree, "add", "-A", check=False)
+    return git(worktree, "-c", "user.email=dg@localhost", "-c", "user.name=delegation-governor",
+               "commit", "-m", message, check=False).returncode == 0
+
+
+def remove_worktree(repo: str, worktree: str, branch: str | None = None,
+                    force: bool = False) -> dict[str, Any]:
+    """Retire a worktree without losing work.
+
+    Loose changes are committed to the branch first, and the branch itself is
+    only deleted once its commits are reachable from HEAD -- otherwise cleanup
+    would silently destroy output nobody has merged yet. `force` overrides.
+    """
+    res: dict[str, Any] = {"worktreeRemoved": False, "branchDeleted": False,
+                           "snapshotted": False, "keptBranch": None}
     if Path(worktree).exists():
+        res["snapshotted"] = snapshot(worktree, "wip(dg): snapshot before cleanup")
         res["worktreeRemoved"] = git(repo, "worktree", "remove", "--force", worktree,
                                      check=False).returncode == 0
     git(repo, "worktree", "prune", check=False)
     if branch:
-        res["branchDeleted"] = git(repo, "branch", "-D", branch, check=False).returncode == 0
+        if force or is_merged(repo, branch):
+            res["branchDeleted"] = git(repo, "branch", "-D", branch,
+                                       check=False).returncode == 0
+        else:
+            res["keptBranch"] = branch
+            res["reason"] = (f"{branch} is not merged into HEAD; kept so the work is not "
+                             f"lost. Merge it, or re-run with --force to discard.")
     return res

@@ -366,8 +366,14 @@ def cmd_integrate(args) -> int:
     if args.cleanup:
         for a in store.attempts_for(con, args.id):
             if a["worktree"] and a["worker"] == "codex":
-                cleaned.append(gitutil.remove_worktree(t["repo"], a["worktree"], a["branch"]))
-    return _emit({"task": args.id, "status": "INTEGRATED", "cleanup": cleaned}, True)
+                cleaned.append(gitutil.remove_worktree(
+                    t["repo"], a["worktree"], a["branch"], force=args.discard))
+    out = {"task": args.id, "status": "INTEGRATED", "cleanup": cleaned}
+    kept = [c["keptBranch"] for c in cleaned if c.get("keptBranch")]
+    if kept:
+        out["note"] = (f"kept unmerged branch(es) {', '.join(kept)} -- the work is only "
+                       f"there. Merge, or re-run with --cleanup --discard to drop it.")
+    return _emit(out, True)
 
 
 # ---------------------------------------------------------------- overrides
@@ -398,10 +404,15 @@ def cmd_clear_override(args) -> int:
 def cmd_doctor(args) -> int:
     con = store.connect()
     cfg = _cfg_with_overrides(con)
-    checks: list[tuple[str, bool, str]] = []
+    # ok / warn / fail. A warning is an advisory about this environment, not
+    # a broken install, so it must not make `dg doctor` exit non-zero.
+    checks: list[tuple[str, str, str]] = []
 
     def chk(name, ok, detail=""):
-        checks.append((name, bool(ok), detail))
+        checks.append((name, "ok" if ok else "fail", detail))
+
+    def warn(name, detail=""):
+        checks.append((name, "warn", detail))
 
     chk("governor state dir", config.HOME.exists(), str(config.HOME))
     chk("governor db", config.DB_PATH.exists(), str(config.DB_PATH))
@@ -417,11 +428,22 @@ def cmd_doctor(args) -> int:
     chk("claude CLI", bool(shutil.which("claude")), shutil.which("claude") or "not on PATH")
     chk("git", bool(shutil.which("git")), "")
 
+    from . import launcher
     ok, detail = _probe_lmstudio(cfg)
     chk("lm studio (supervisor fallback)", ok, detail)
     if ok:
         amok, amdetail = _probe_lmstudio_messages(cfg)
         chk("lm studio /v1/messages (anthropic api)", amok, amdetail)
+        state, loaded, maximum = launcher.model_context(cfg)
+        need = cfg["lmstudio"]["minContextLength"]
+        chk("lm studio supervisor context",
+            state != "loaded" or bool(loaded and loaded >= need),
+            f"{cfg['lmstudio']['model']} {state}, ctx {loaded}/{maximum}, "
+            f"need >= {need} for Claude Code's ~34k system prompt"
+            + ("" if state == "loaded" else " (dg launch loads it on demand)"))
+        contention = launcher.local_contention(cfg)
+        if contention:
+            warn("lm studio single model slot", contention)
 
     lp = store.kv_get(con, "launcher") or {}
     if lp:
@@ -439,9 +461,11 @@ def cmd_doctor(args) -> int:
         f"5h {_pct(sup['fiveHour'])} 7d {_pct(sup['sevenDay'])}")
 
     if args.json:
-        return _emit([{"check": c, "ok": o, "detail": d} for c, o, d in checks], True)
-    print("\n".join(f"[{'ok ' if o else 'FAIL'}] {c:<32} {d}" for c, o, d in checks))
-    return 0 if all(o for _, o, _ in checks) else 1
+        return _emit([{"check": c, "status": st, "ok": st != "fail", "detail": d}
+                      for c, st, d in checks], True)
+    label = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}
+    print("\n".join(f"[{label[st]}] {c:<32} {d}" for c, st, d in checks))
+    return 1 if any(st == "fail" for _, st, _ in checks) else 0
 
 
 def _probe_lmstudio(cfg: dict) -> tuple[bool, str]:
@@ -604,6 +628,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("integrate", cmd_integrate, help="mark reviewed work integrated")
     s.add_argument("id")
     s.add_argument("--cleanup", action="store_true", help="remove the codex worktree")
+    s.add_argument("--discard", action="store_true",
+                   help="with --cleanup, also delete a branch that is not merged (destructive)")
     s.add_argument("--force", action="store_true")
 
     s = add("override", cmd_override, help="force supervisor or worker")

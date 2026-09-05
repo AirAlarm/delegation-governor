@@ -100,8 +100,18 @@ def read_rate_limits(timeout: float = 45.0) -> dict[str, Any]:
         result.update(ok=False, errorKind=NETWORK_ERROR, detail=f"timed out after {timeout}s")
     try:
         proc.kill()
-    except OSError:
+        proc.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
         pass
+    finally:
+        # Close the pipes explicitly; Popen only reaps them on GC otherwise,
+        # and this runs often enough for that to leak descriptors.
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                if stream:
+                    stream.close()
+            except OSError:
+                pass
     return result
 
 

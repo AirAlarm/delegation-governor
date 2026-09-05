@@ -116,7 +116,7 @@ dg integrate $A --cleanup
 | `dg workorder <id>` | render the bounded contract |
 | `dg dispatch <id>` | claim + start, non-blocking |
 | `dg attach <id> <cc-task-id>` | register a cc-delegate job |
-| `dg collect <id>` / `dg integrate <id>` | result / accept |
+| `dg collect <id>` / `dg integrate <id>` | result / accept (`--cleanup` keeps unmerged branches) |
 | `dg fallback <id>` | clean retry after a failure |
 | `dg worker-status` / `dg logs [<id>]` | live attempts / worker logs |
 | `dg probe codex\|claude` | confirm a provider really recovered |
@@ -152,9 +152,14 @@ dg integrate $A --cleanup
   },
   "lmstudio": {
     "baseUrl": "http://127.0.0.1:1234",
-    "model": "qwen/qwen3.6-35b-a3b",
-    "smallModel": "google/gemma-4-e4b",
-    "tokenEnvVar": "LMSTUDIO_API_KEY"          // name only, never the value
+    "model": "openai/gpt-oss-20b",             // 12GB: fits alongside 128k ctx
+    "smallModel": "openai/gpt-oss-20b",
+    "tokenEnvVar": "LMSTUDIO_API_KEY",         // name only, never the value
+    "contextLength": 131072,                   // loaded via `lms load -c`
+    "minContextLength": 40960,                 // Claude Code's prompt is ~34k
+    "loadTimeoutSeconds": 600,
+    "ttlSeconds": 3600,
+    "autoLoad": true                           // false = you manage residency
   }
 }
 ```
@@ -182,6 +187,8 @@ stored anywhere.
 - Atomic claiming: `BEGIN IMMEDIATE`, so two sessions cannot claim one task.
 - WRITE work runs in a git worktree **outside** your repo, branched from the
   current commit. Your working tree is never touched, not even on failure.
+- Cleanup never loses work: loose worker output is committed to its branch, and
+  an unmerged branch is kept (with a note) unless you pass `--discard`.
 
 ## Quota behaviour
 
@@ -208,7 +215,9 @@ stored anywhere.
 | Codex stuck exhausted | `dg quota --force`, then `dg probe codex` |
 | Task stuck BLOCKED | `dg show <id>` - the `reason` field names the cause |
 | Everything BLOCKED on capacity | raise `totalWriteJobsPerRepo`, or integrate finished work |
-| `dg launch` refuses to start | LM Studio is unreachable while LOCAL; the message lists the three fixes |
+| `dg launch` refuses to start | LM Studio unreachable or its model will not load while LOCAL; the message lists the fixes |
+| `exceed_context_size_error` on LOCAL | the model is loaded with too little context; `dg launch` reloads it, or `lms load <model> -c 131072 -y` |
+| cc-delegate times out while LOCAL | both share one LM Studio model slot - see the `dg doctor` warning; delegate to Codex or an `oracle-*` profile instead |
 | Worker seems hung | `dg worker-status` - `SLOW` is normal for a cold local model |
 
 ## Upgrade

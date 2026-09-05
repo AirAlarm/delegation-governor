@@ -28,12 +28,15 @@ You own this judgement. A worker reporting success is a claim, not evidence.
 ## Integrate
 
 ```bash
-dg integrate DG-4 --cleanup      # marks INTEGRATED, removes the worktree
+dg integrate DG-4 --cleanup      # marks INTEGRATED, retires the worktree
 ```
 
-The work is in a worktree on branch `dg/dg-4`. Merge, cherry-pick or copy it
-into your tree as the situation needs - that is a decision, so it is yours.
-Integrate before `--cleanup`: cleanup deletes the branch.
+`integrate` records the decision; it does **not** merge for you. The work is on
+branch `dg/dg-4` - merge, cherry-pick or copy it as the situation needs.
+
+`--cleanup` is safe: it commits whatever the worker left loose onto that branch,
+removes the worktree, and **keeps the branch unless it is already merged into
+HEAD**, telling you so. Only `--cleanup --discard` throws unmerged work away.
 
 Dependants become READY the moment the parent is `SUCCEEDED`; `INTEGRATED`
 also satisfies them.

@@ -37,6 +37,7 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from . import store, supervisor
@@ -118,6 +119,65 @@ def probe_lmstudio(cfg: dict) -> tuple[bool, str]:
     return True, f"{lm['baseUrl']} serving {lm['model']}"
 
 
+def model_context(cfg: dict) -> tuple[str, int | None, int | None]:
+    """(state, loaded_context, max_context) for the supervisor model.
+
+    Read from LM Studio's own REST API, which reports residency and the
+    context the model was actually loaded with.
+    """
+    import urllib.error
+    import urllib.request
+    lm = cfg["lmstudio"]
+    try:
+        with urllib.request.urlopen(
+                lm["baseUrl"].rstrip("/") + "/api/v0/models", timeout=5) as r:
+            for m in json.loads(r.read()).get("data", []):
+                if m.get("id") == lm["model"]:
+                    return (m.get("state", "unknown"), m.get("loaded_context_length"),
+                            m.get("max_context_length"))
+    except (urllib.error.URLError, OSError, ValueError):
+        pass
+    return "unknown", None, None
+
+
+def ensure_local_model(cfg: dict) -> tuple[bool, str]:
+    """Guarantee the supervisor model is resident with enough context.
+
+    Claude Code's system prompt plus tool definitions measured ~34k tokens, so
+    a model at LM Studio's default context rejects the very first turn with
+    `exceed_context_size_error`. Loading is therefore part of switching to
+    LOCAL, not something to hope the user did.
+    """
+    lm = cfg["lmstudio"]
+    state, loaded, maximum = model_context(cfg)
+    need = lm["minContextLength"]
+    if state == "loaded" and loaded and loaded >= need:
+        return True, f"{lm['model']} loaded with {loaded} ctx"
+    if not lm.get("autoLoad", True):
+        return False, (f"{lm['model']} is {state} with ctx {loaded}; need >= {need} "
+                       f"and lmstudio.autoLoad is off")
+
+    lms = shutil.which("lms")
+    if not lms:
+        return False, f"`lms` not on PATH; load {lm['model']} manually with -c {need}"
+    want = min(lm["contextLength"], maximum or lm["contextLength"])
+    cmd = [lms, "load", lm["model"], "-c", str(want), "-y", "--ttl", str(lm["ttlSeconds"])]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=lm["loadTimeoutSeconds"])
+    except subprocess.TimeoutExpired:
+        return False, f"loading {lm['model']} timed out after {lm['loadTimeoutSeconds']}s"
+    except OSError as e:
+        return False, f"could not run lms load: {e}"
+    if p.returncode != 0 or "Error" in (p.stdout + p.stderr):
+        tail = (p.stdout + p.stderr).replace("\r", "\n").strip().splitlines()
+        return False, f"lms load failed: {tail[-1][:200] if tail else 'unknown error'}"
+    state, loaded, _ = model_context(cfg)
+    if loaded and loaded < need:
+        return False, f"{lm['model']} loaded but only {loaded} ctx; need >= {need}"
+    return True, f"{lm['model']} loaded with {loaded or want} ctx"
+
+
 def probe_lmstudio_messages(cfg: dict) -> tuple[bool, str]:
     """Confirm the Anthropic Messages API is really served, at zero inference cost.
 
@@ -162,6 +222,30 @@ def build_argv(claude: str, route: str, model: str, session_id: str, first: bool
     return argv + [a for a in extra if a != "--"]
 
 
+def local_contention(cfg: dict) -> str:
+    """Warn when the LOCAL supervisor and cc-delegate share one model slot.
+
+    LM Studio keeps one model resident at a time on a single-GPU box. If the
+    supervisor is running there and a cc-delegate station-* profile points at
+    the same instance, the two evict each other: observed live as a
+    cc-delegate model-gate timeout while the supervisor model was loading.
+    Detection only -- serialising someone else's worker is not ours to do.
+    """
+    try:
+        cc = json.loads((Path.home() / ".cc-delegate" / "config.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return ""
+    host = cfg["lmstudio"]["baseUrl"].rstrip("/")
+    shared = sorted(name for name, p in (cc.get("profiles") or {}).items()
+                    if str(p.get("api_base", "")).rstrip("/").startswith(host))
+    if not shared:
+        return ""
+    return ("LOCAL supervisor and cc-delegate profiles " + ", ".join(shared)
+            + f" share one LM Studio ({host}), which holds a single model at a time. "
+              "Run them one at a time, or delegate to Codex / an oracle-* profile "
+              "while the supervisor is LOCAL.")
+
+
 def _dead_local_help(cfg: dict, detail: str) -> str:
     return (f"dg launch: the supervisor wants LOCAL but the local backend is not usable.\n"
             f"  {detail}\n"
@@ -189,6 +273,8 @@ def run(cfg: dict, claude_args: list[str], dry_run: bool = False,
     while True:
         if route == LOCAL:
             ok, detail = probe_lmstudio(cfg)
+            if ok:
+                ok, detail = ensure_local_model(cfg)
             if not ok:
                 # Clear recovery path beats a restart loop into a dead endpoint.
                 print(_dead_local_help(cfg, detail), file=sys.stderr)
@@ -197,6 +283,9 @@ def run(cfg: dict, claude_args: list[str], dry_run: bool = False,
                 route = ANTHROPIC
                 forced_anthropic = True
                 decision = {"route": ANTHROPIC, "reason": "forced past unusable LM Studio"}
+
+        if route == LOCAL and (warn := local_contention(cfg)):
+            print(f"dg launch: warning: {warn}", file=sys.stderr)
 
         env, model = env_for(route, cfg)
         argv = build_argv(claude, route, model, session_id, first, claude_args)

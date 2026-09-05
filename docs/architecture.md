@@ -74,7 +74,7 @@ dg launch
   -> claude --session-id <uuid> --model sonnet            (Anthropic)
   -> user works; StopFailure(rate_limit) records LOCAL
   -> claude exits (natural boundary)
-  -> claude --resume <uuid> --model qwen/qwen3.6-35b-a3b  (LM Studio)
+  -> claude --resume <uuid> --model openai/gpt-oss-20b     (LM Studio)
   -> reset passes, probe confirms Anthropic
   -> claude --resume <uuid> --model sonnet                (Anthropic)
 ```
@@ -101,6 +101,39 @@ prints the recovery path instead.
 reverse proxy that swaps upstreams mid-stream (a custom proxy to avoid a
 process restart - more moving parts, and mid-request switching is exactly
 where correctness gets hard).
+
+## ADR 2b: the LOCAL route has two hard prerequisites
+
+Proven live (`claude -p` against LM Studio returned `LOCAL-OK`), but only
+after two failures that the design now handles rather than hopes about.
+
+**Context size.** Claude Code's system prompt plus tool definitions measured
+**33,684 tokens**. A model loaded at LM Studio's default context rejects the
+very first turn:
+
+```
+exceed_context_size_error: request (33684 tokens) exceeds the available
+context size (26112 tokens)
+```
+
+So `dg launch` treats residency as part of switching to LOCAL: it reads
+`/api/v0/models` for the model's state and `loaded_context_length`, and runs
+`lms load <model> -c <contextLength>` when that is missing or too small,
+capped at the model's own maximum. `minContextLength` defaults to 40960 --
+comfortably above the measured 34k, low enough to allow a modest box.
+
+**Model size.** The default supervisor model is `openai/gpt-oss-20b`, not the
+larger `qwen/qwen3.6-35b-a3b`. The 35B's weights alone are 22GB, and LM Studio's
+memory guardrails refuse to load it at any useful context on this machine;
+the 20B is 12GB and loads at the full 131072. Both are configurable.
+
+**One model slot.** LM Studio holds a single model resident. A LOCAL
+supervisor and a cc-delegate `station-*` profile therefore evict each other --
+observed live as a cc-delegate model-gate timeout while the supervisor model
+was loading, which failed that delegated task. `dg doctor` and `dg launch`
+detect the shared endpoint and warn; the Governor does not try to serialise
+another tool's worker. While the supervisor is LOCAL, delegate to Codex or an
+`oracle-*` profile.
 
 ## ADR 3: SQLite for state
 
@@ -133,6 +166,14 @@ and both stay visible. Failed attempts are never hidden.
 
 Partial output from a failed attempt is preserved on disk for diagnosis, and
 never reused: `dg fallback` starts a fresh task from the original clean base.
+
+Cleanup is likewise non-destructive, after live testing showed it was not:
+`integrate --cleanup` originally removed the worktree and force-deleted the
+branch while the worker's output was still *uncommitted*, destroying the only
+copy - a later task branched from HEAD then failed because the change had
+vanished. Cleanup now commits loose output to the branch first and keeps any
+branch not already reachable from HEAD, saying so; `--discard` is the explicit
+opt-in to throw it away.
 
 ## ADR 6: quota inspection costs zero inference
 

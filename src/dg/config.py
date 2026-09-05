@@ -45,11 +45,25 @@ DEFAULTS: dict[str, Any] = {
     },
     "lmstudio": {
         "baseUrl": "http://127.0.0.1:1234",
-        "model": "qwen/qwen3.6-35b-a3b",
-        "smallModel": "google/gemma-4-e4b",
+        # gpt-oss-20b, not the larger qwen: at 12GB it leaves room to load
+        # 128k of context, where the 35B's weights alone (22GB) trip LM
+        # Studio's memory guardrails on this box. Change both freely.
+        "model": "openai/gpt-oss-20b",
+        "smallModel": "openai/gpt-oss-20b",
         # Env var holding the LM Studio token, when the server requires one.
         # The value is never stored here.
         "tokenEnvVar": "LMSTUDIO_API_KEY",
+        # Claude Code's system prompt plus tool definitions measured ~34k
+        # tokens against this build, so a model loaded at LM Studio's default
+        # context refuses the very first turn with exceed_context_size_error.
+        # Load it big, or the LOCAL route is useless.
+        "contextLength": 131072,
+        "minContextLength": 40960,
+        "loadTimeoutSeconds": 600,
+        "ttlSeconds": 3600,
+        # `lms load` is how a model gets a usable context. Set false if you
+        # manage LM Studio residency yourself.
+        "autoLoad": True,
     },
     "overrides": {"supervisor": "auto", "worker": "auto"},
 }

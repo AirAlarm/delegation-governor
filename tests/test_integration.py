@@ -273,6 +273,10 @@ class TestFallback(DGTest):
 
     def test_fallback_task_starts_from_the_original_clean_base(self):
         from dg import cli
+        # cmd_fallback consults routing, which would otherwise spawn a real
+        # codex app-server just to answer "which worker next".
+        quota_codex.read_rate_limits = lambda *a, **k: {
+            "ok": False, "errorKind": quota_codex.NETWORK_ERROR, "detail": "stubbed"}
         repo = make_repo()
         a = self.task("A", repo=repo, paths=["src/**"])
         wt = gitutil.create_worktree(repo, a)
@@ -351,3 +355,65 @@ class TestWorktreeIsolation(DGTest):
         wt = gitutil.create_worktree(repo, a, base)
         self.assertEqual(wt["baseCommit"], base)
         self.assertEqual(gitutil.head_commit(wt["worktree"]), base)
+
+
+class TestCleanupPreservesWork(DGTest):
+    """`integrate --cleanup` must never be the thing that loses the work.
+
+    Regression: cleanup removed the worktree and force-deleted the branch
+    while the worker's output was still uncommitted, destroying the only copy.
+    A later task branched from HEAD then failed because the change was gone.
+    """
+
+    def _finished_task(self):
+        repo = make_repo()
+        a = self.task("A", repo=repo, paths=["calc.py"])
+        wt = gitutil.create_worktree(repo, a)
+        Path(wt["worktree"], "calc.py").write_text("def subtract(a, b):\n    return a - b\n")
+        store.set_status(self.con, a, "SUCCEEDED")
+        store.add_attempt(self.con, a, "codex", worktree=wt["worktree"], branch=wt["branch"])
+        return repo, a, wt
+
+    def test_uncommitted_work_is_snapshotted_before_removal(self):
+        repo, _, wt = self._finished_task()
+        res = gitutil.remove_worktree(repo, wt["worktree"], wt["branch"])
+        self.assertTrue(res["snapshotted"])
+        self.assertTrue(res["worktreeRemoved"])
+        self.assertFalse(res["branchDeleted"], "unmerged branch must survive cleanup")
+        self.assertEqual(res["keptBranch"], wt["branch"])
+        # The work is still reachable on the branch.
+        blob = gitutil.git(repo, "show", f"{wt['branch']}:calc.py", check=False).stdout
+        self.assertIn("subtract", blob)
+
+    def test_merged_branch_is_deleted(self):
+        repo, _, wt = self._finished_task()
+        gitutil.snapshot(wt["worktree"], "work")
+        gitutil.git(repo, "merge", "--no-ff", "-m", "merge", wt["branch"])
+        res = gitutil.remove_worktree(repo, wt["worktree"], wt["branch"])
+        self.assertTrue(res["branchDeleted"])
+        self.assertIsNone(res["keptBranch"])
+
+    def test_force_discards_unmerged_work_when_asked(self):
+        repo, _, wt = self._finished_task()
+        res = gitutil.remove_worktree(repo, wt["worktree"], wt["branch"], force=True)
+        self.assertTrue(res["branchDeleted"])
+
+    def test_integrate_cleanup_reports_the_kept_branch(self):
+        from dg import cli
+        repo, a, wt = self._finished_task()
+        args = type("A", (), {"id": a, "cleanup": True, "discard": False, "force": False})()
+        self.assertEqual(cli.cmd_integrate(args), 0)
+        self.assertEqual(store.get_task(self.con, a)["status"], "INTEGRATED")
+        self.assertTrue(gitutil.git(repo, "rev-parse", "--verify", wt["branch"],
+                                    check=False).returncode == 0,
+                        "branch holding the only copy of the work was deleted")
+
+    def test_a_later_task_can_branch_from_merged_work(self):
+        """The end-to-end shape of the original bug."""
+        repo, _, wt = self._finished_task()
+        gitutil.snapshot(wt["worktree"], "work")
+        gitutil.git(repo, "merge", "--no-ff", "-m", "merge", wt["branch"])
+        gitutil.remove_worktree(repo, wt["worktree"], wt["branch"])
+        b = self.task("B", repo=repo, paths=["test_calc.py"])
+        wt2 = gitutil.create_worktree(repo, b)
+        self.assertIn("subtract", Path(wt2["worktree"], "calc.py").read_text())
