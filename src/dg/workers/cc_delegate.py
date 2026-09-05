@@ -48,19 +48,20 @@ def read_job(repo: str, cc_task_id: str) -> dict[str, Any] | None:
 
 def attach(
     con: sqlite3.Connection, task: dict[str, Any], cc_task_id: str, work_order: str,
+    lane: str | None = None,
 ) -> dict[str, Any]:
     """Register a cc-delegate job Claude just launched against a ledger task."""
     job = read_job(task["repo"], cc_task_id)
     attempt_id = store.add_attempt(
         con, task["id"], "cc-delegate", handle=f"cc:{cc_task_id}",
         worktree=(job or {}).get("worktree"), branch=(job or {}).get("branch"),
-        log_path=str(job_file(task["repo"], cc_task_id)),
+        log_path=str(job_file(task["repo"], cc_task_id)), lane=lane,
     )
     from .. import config
     (config.LOG_DIR / f"{task['id']}.spec.md").write_text(work_order, "utf-8")
     store.set_status(con, task["id"], "RUNNING")
     return {"ok": True, "attemptId": attempt_id, "ccTaskId": cc_task_id,
-            "jobFileFound": job is not None}
+            "lane": lane, "jobFileFound": job is not None}
 
 
 def sync(con: sqlite3.Connection, attempt: dict[str, Any]) -> str | None:

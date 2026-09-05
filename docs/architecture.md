@@ -52,6 +52,13 @@ body and checking for an Anthropic-shaped `invalid_request_error` - LM Studio
 answers unknown paths with a generic 200, so the error *shape* is the
 discriminator, not the status code.
 
+Routine lane probes do **not** do this. They GET `/api/v0/models`, which also
+reports residency and loaded context. The invalid POST is correct but logs a
+red `invalid_request_error` in the user's LM Studio window every time it runs,
+which is a bad trade for information a GET already carries. It stays in
+`dg doctor`, where it runs once on request and the question it answers is the
+actual point.
+
 **Rejected:** CCR (unnecessary hop), LiteLLM in Anthropic mode (heavy
 dependency for a translation that is not needed), a hand-written proxy
 (a protocol to maintain forever).
@@ -204,6 +211,40 @@ user* `ANTHROPIC_BASE_URL` -- the only channel Desktop inherits. The trade is
 explicit: Claude Code then depends on the proxy being up, so a `SessionStart`
 hook starts it on demand, `dg doctor` fails loudly if the variable points at a
 dead port, and `dg uninstall` removes the variable again.
+
+## ADR 2e: lanes are machines, and tasks are classified
+
+Capacity was keyed by *tool* (`codex: 1`, `cc-delegate: 1`), which gave the GPU
+box and the Oracle VM a single shared slot even though they are different
+computers -- the VM sat idle whenever the GPU was busy. Routing was also purely
+availability-based, so Codex took everything and both local machines idled
+until Codex died.
+
+Now capacity is keyed by the resource that is actually scarce:
+
+| Lane | Machine | Slots |
+|---|---|---|
+| `codex` | cloud | 1 |
+| `station` | GPU box, one resident model | 1 |
+| `oracle` | CPU VM | 2 |
+
+and tasks carry a class (`tiny/simple/standard/hard`) that selects a lane
+preference before availability is considered. Claude sets the class when
+decomposing the work -- no heuristic can judge difficulty, and guessing it from
+path counts would be exactly the kind of cleverness v1 avoids.
+
+The `station` lane is excluded automatically while the supervisor is running on
+that box, which is the contention that failed a real delegated task earlier.
+
+`dg fill` starts one READY task in every free lane. Proven live: `hard -> codex`
+(pid 26384) and `simple -> station` (gpt-oss-20b) running at the same moment,
+with `oracle` still free.
+
+Schema v2 adds `tasks.task_class` and `attempts.lane`; both are additive and a
+v1 ledger migrates in place. The config schema is versioned too -- a v1 config
+is retired to a timestamped copy rather than merged, because merging its
+tool-keyed capacity over the lane model would silently cap concurrency at the
+old numbers.
 
 ## ADR 3: SQLite for state
 

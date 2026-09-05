@@ -279,7 +279,7 @@ class TestLifecycle(LauncherTest):
 
     def test_dead_local_endpoint_gives_a_recovery_path_not_a_loop(self):
         self.quota(99, 10)
-        launcher.probe_tier = lambda t: (False, f"{t['name']}: connection refused")
+        launcher.probe_tier = lambda t, load=False: (False, f"{t['name']}: connection refused")
         f = self.fake([(0, 100.0, None)])
         rc = launcher.run(self.cfg, [], max_restarts=5)
         self.assertEqual(rc, 2)
@@ -287,7 +287,7 @@ class TestLifecycle(LauncherTest):
 
     def test_force_starts_on_anthropic_when_local_is_dead(self):
         self.quota(99, 10)
-        launcher.probe_tier = lambda t: (False, f"{t['name']}: connection refused")
+        launcher.probe_tier = lambda t, load=False: (False, f"{t['name']}: connection refused")
         f = self.fake([(0, 500.0, None)])
         rc = launcher.run(self.cfg, [], force=True, max_restarts=5)
         self.assertEqual(rc, 0)
@@ -474,7 +474,7 @@ class TestLocalModelResidency(LauncherTest):
 
     def test_launch_refuses_local_when_the_model_cannot_be_loaded(self):
         self.quota(99, 10)
-        launcher.probe_tier = lambda t: (False, f"{t['name']}: out of memory")
+        launcher.probe_tier = lambda t, load=False: (False, f"{t['name']}: out of memory")
         f = self.fake([(0, 100.0, None)])
         rc = launcher.run(self.cfg, [], max_restarts=2)
         self.assertEqual(rc, 2)
@@ -515,3 +515,75 @@ class TestSharedModelSlot(LauncherTest):
     def test_missing_cc_delegate_config_is_silent(self):
         launcher.Path = type("P", (), {"home": staticmethod(lambda: self.home / "nope")})()
         self.assertEqual(launcher.local_contention(self.cfg), "")
+
+
+class TestProbeHasNoSideEffects(LauncherTest):
+    """Checking whether a lane is up must not load a multi-GB model.
+
+    Regression: probe_tier called ensure_local_model unconditionally, so a
+    plain `dg lanes` pinned the GPU's model at supervisor context. cc-delegate
+    then timed out trying to swap it and a real delegated task failed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.unstub("probe_tier", "ensure_local_model")
+        self.loads = []
+        launcher.ensure_local_model = lambda t: (self.loads.append(t["name"]), (True, "loaded"))[1]
+        launcher.model_context = lambda t: ("loaded", 131072, 131072)
+
+    def _fake_http(self, body=b'{"type":"error","error":{"message":"x"}}'):
+        """Answer the probe's HTTP call with a minimal Anthropic-shaped error."""
+        import io
+        import urllib.request
+
+        class R(io.BytesIO):
+            def __enter__(s):
+                return s
+
+            def __exit__(s, *a):
+                return False
+
+        real = urllib.request.urlopen
+        urllib.request.urlopen = lambda req, timeout=None: R(body)
+        self.addCleanup(setattr, urllib.request, "urlopen", real)
+
+    def test_plain_probe_does_not_load(self):
+        ok, detail = launcher.probe_tier(self.cfg["supervisorFallbacks"][0])
+        self.assertTrue(ok)
+        self.assertEqual(self.loads, [], "an availability check loaded a model")
+
+    def test_launch_probe_does_load(self):
+        ok, _ = launcher.probe_tier(self.cfg["supervisorFallbacks"][0], load=True)
+        self.assertTrue(ok)
+        self.assertEqual(self.loads, ["lmstudio"])
+
+    def test_lmstudio_probe_sends_no_post(self):
+        """Regression: the probe used to POST an invalid body, which logged a
+        red error in the user's LM Studio window every time."""
+        import urllib.request
+        posts = []
+        real = urllib.request.urlopen
+
+        def spy(req, timeout=None):
+            if getattr(req, "get_method", lambda: "GET")() == "POST":
+                posts.append(req.full_url)
+            return real(req, timeout=timeout)
+
+        urllib.request.urlopen = spy
+        self.addCleanup(setattr, urllib.request, "urlopen", real)
+        launcher.probe_tier(self.cfg["supervisorFallbacks"][0])
+        self.assertEqual(posts, [], "availability probe POSTed to LM Studio")
+
+    def test_unreachable_lmstudio_is_reported(self):
+        launcher.model_context = lambda t: ("unknown", None, None)
+        ok, detail = launcher.probe_tier(self.cfg["supervisorFallbacks"][0])
+        self.assertFalse(ok)
+        self.assertIn("unreachable", detail)
+
+    def test_too_small_context_is_reported_without_loading(self):
+        launcher.model_context = lambda t: ("loaded", 8192, 131072)
+        ok, detail = launcher.probe_tier(self.cfg["supervisorFallbacks"][0])
+        self.assertFalse(ok)
+        self.assertIn("only 8192 ctx", detail)
+        self.assertEqual(self.loads, [])

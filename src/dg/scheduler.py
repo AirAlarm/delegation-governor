@@ -85,13 +85,10 @@ def capacity_reason(task: dict[str, Any], tasks: list[dict[str, Any]], cfg: dict
 
 
 def worker_capacity_free(con: sqlite3.Connection, worker: str, repo: str, cfg: dict) -> bool:
-    """Per-worker WRITE slot check, used at dispatch time."""
-    limit = cfg["workers"].get(worker, {}).get("maxWriteJobsPerRepo")
-    if limit is None:
-        return True
-    n = len([a for a in store.running_attempts(con)
-             if a["worker"] == worker and a["repo"] == repo and a["task_mode"] == "WRITE"])
-    return n < limit
+    """Is any lane belonging to this worker free? Used at dispatch time."""
+    from . import lanes as lanes_mod
+    names = [n for n, spec in lanes_mod.lanes(cfg).items() if spec["worker"] == worker]
+    return any(lanes_mod.has_capacity(con, n, repo, cfg) for n in names)
 
 
 def evaluate(con: sqlite3.Connection, cfg: dict) -> dict[str, Any]:

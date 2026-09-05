@@ -15,6 +15,21 @@ CODEX = "codex"
 CC_DELEGATE = "cc-delegate"
 
 
+def select_for(con: sqlite3.Connection, cfg: dict, task: dict[str, Any]) -> dict[str, Any]:
+    """Which lane should run this specific task?
+
+    Class first, availability second -- so a trivial edit does not consume the
+    Codex slot a hard task needs, and the local boxes stop idling while Codex
+    is healthy.
+    """
+    from . import lanes as lanes_mod
+    choice = lanes_mod.choose(con, cfg, task)
+    if choice["lane"] is None:
+        # Nothing suits it right now; say so rather than guessing a lane.
+        return {**choice, "worker": None}
+    return choice
+
+
 def select(con: sqlite3.Connection, cfg: dict, refresh: bool = True) -> dict[str, Any]:
     override = cfg["overrides"]["worker"]
     if override == CODEX:

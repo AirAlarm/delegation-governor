@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 from . import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # READY and BLOCKED are never stored: they are derived from PLANNED + the
 # dependency graph, so the ledger cannot go stale against its own edges.
@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     depends_on TEXT NOT NULL DEFAULT '[]',
     owner TEXT,
     priority INTEGER NOT NULL DEFAULT 0,
+    task_class TEXT NOT NULL DEFAULT 'standard',
     session_id TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     worker TEXT NOT NULL,
+    lane TEXT,
     status TEXT NOT NULL,
     handle TEXT,
     worktree TEXT,
@@ -96,8 +98,24 @@ def _migrate(con: sqlite3.Connection) -> None:
             f"governor.db is schema v{have}, this dg understands v{SCHEMA_VERSION}. Upgrade dg."
         )
     if have < SCHEMA_VERSION:
-        # Future versions add their ALTER TABLE steps here before the bump.
-        con.execute("UPDATE meta SET value=? WHERE key='schemaVersion'", (str(SCHEMA_VERSION),))
+        _upgrade(con, have)
+        con.execute("UPDATE meta SET value=? WHERE key='schemaVersion'",
+                    (str(SCHEMA_VERSION),))
+
+
+def _upgrade(con: sqlite3.Connection, have: int) -> None:
+    """Additive column adds; CREATE TABLE IF NOT EXISTS already covers new dbs.
+
+    Existing rows keep working: an unclassified task is `standard`, and an
+    attempt with no lane predates lanes entirely.
+    """
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
+    if have < 2 and "task_class" not in cols:
+        con.execute("ALTER TABLE tasks ADD COLUMN task_class TEXT NOT NULL "
+                    "DEFAULT 'standard'")
+    acols = {r["name"] for r in con.execute("PRAGMA table_info(attempts)")}
+    if have < 2 and "lane" not in acols:
+        con.execute("ALTER TABLE attempts ADD COLUMN lane TEXT")
 
 
 # ---------------------------------------------------------------- kv state
@@ -158,6 +176,7 @@ def create_task(
     owner: str | None = None,
     priority: int = 0,
     base_commit: str | None = None,
+    task_class: str = "standard",
 ) -> str:
     mode = mode.upper()
     if mode not in ("READ_ONLY", "WRITE"):
@@ -171,9 +190,11 @@ def create_task(
         tid = next_id(con)
         con.execute(
             "INSERT INTO tasks(id,title,mode,status,goal,repo,base_commit,paths,depends_on,"
-            "owner,priority,created_at,updated_at) VALUES(?,?,?,'PLANNED',?,?,?,?,?,?,?,?,?)",
+            "owner,priority,task_class,created_at,updated_at)"
+            " VALUES(?,?,?,'PLANNED',?,?,?,?,?,?,?,?,?,?)",
             (tid, title, mode, goal, os.path.abspath(repo) if repo else "", base_commit,
-             json.dumps(list(paths)), json.dumps(deps), owner, priority, now, now),
+             json.dumps(list(paths)), json.dumps(deps), owner, priority, task_class,
+             now, now),
         )
     return tid
 
@@ -188,6 +209,7 @@ def _task_row(row: sqlite3.Row) -> dict[str, Any]:
     d["createdAt"] = d.pop("created_at")
     d["updatedAt"] = d.pop("updated_at")
     d["sessionId"] = d.pop("session_id")
+    d["taskClass"] = d.pop("task_class", "standard")
     return d
 
 
@@ -254,11 +276,12 @@ def release(con: sqlite3.Connection, tid: str) -> None:
 def add_attempt(
     con: sqlite3.Connection, task_id: str, worker: str, handle: str | None = None,
     worktree: str | None = None, branch: str | None = None, log_path: str | None = None,
+    lane: str | None = None,
 ) -> int:
     cur = con.execute(
-        "INSERT INTO attempts(task_id,worker,status,handle,worktree,branch,log_path,started_at)"
-        " VALUES(?,?,'RUNNING',?,?,?,?,?)",
-        (task_id, worker, handle, worktree, branch, log_path, time.time()),
+        "INSERT INTO attempts(task_id,worker,lane,status,handle,worktree,branch,log_path,"
+        "started_at) VALUES(?,?,?,'RUNNING',?,?,?,?,?)",
+        (task_id, worker, lane, handle, worktree, branch, log_path, time.time()),
     )
     return int(cur.lastrowid)
 

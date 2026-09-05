@@ -38,7 +38,7 @@ def log_path(task_id: str, attempt: int) -> Path:
 
 def dispatch(
     con: sqlite3.Connection, task: dict[str, Any], work_order: str, session_id: str,
-    sandbox: str | None = None,
+    sandbox: str | None = None, lane: str = "codex",
 ) -> dict[str, Any]:
     """Start Codex on a task and return immediately."""
     config.ensure_home()
@@ -57,7 +57,8 @@ def dispatch(
         cwd, mode = repo, sandbox or "read-only"
 
     attempt_id = store.add_attempt(
-        con, task["id"], "codex", worktree=wt.get("worktree"), branch=wt.get("branch"))
+        con, task["id"], "codex", worktree=wt.get("worktree"), branch=wt.get("branch"),
+        lane=lane)
     lp = log_path(task["id"], attempt_id)
     sp = spec_path(task["id"])
     sp.write_text(work_order, "utf-8")

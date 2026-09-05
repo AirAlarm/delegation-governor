@@ -65,10 +65,24 @@ def _record(con, job, verdict, events, log) -> None:
         return
     if status == "SUCCEEDED":
         result = _write_result(job, events)
-        store.set_status(con, task_id, "SUCCEEDED", result_location=str(result))
+        # A WRITE run that exits clean but changes nothing is usually the
+        # worker declining the task (spec too vague, nothing to do). It is not
+        # a failure, but it must not look like completed work either.
+        note = None
+        if job.get("worktree") and not result_changed(result):
+            note = "worker exited cleanly but changed no files -- read its summary"
+        store.set_status(con, task_id, "SUCCEEDED", failure_reason=note,
+                         result_location=str(result))
         return
     store.set_status(con, task_id, "FAILED", failure_reason="codex run failed")
     _note_partial(con, job, attempt_id)
+
+
+def result_changed(result_path) -> bool:
+    try:
+        return bool(json.loads(Path(result_path).read_text("utf-8")).get("changedFiles"))
+    except (OSError, ValueError):
+        return True  # unknown: do not cry wolf
 
 
 def _note_partial(con, job, attempt_id) -> None:

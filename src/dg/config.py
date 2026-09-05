@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -34,11 +34,37 @@ DEFAULTS: dict[str, Any] = {
         "blockingLimitIds": ["codex"],
     },
     "workers": {
-        "codex": {"maxWriteJobsPerRepo": 1},
-        "cc-delegate": {"maxWriteJobsPerRepo": 1},
-        "totalWriteJobsPerRepo": 2,
+        # Lanes are keyed by the *resource* that is actually scarce, not by the
+        # tool: station and oracle are separate machines, so they can run at
+        # the same time. Modelling them as one "cc-delegate" worker gave them a
+        # shared slot and kept the VM idle whenever the GPU was busy.
+        "lanes": {
+            "codex": {"worker": "codex", "maxWriteJobs": 1},
+            # The GPU box holds one model at a time -- one job, and none at all
+            # while the supervisor itself is running there.
+            "station": {"worker": "cc-delegate", "profile": "station-main",
+                        "maxWriteJobs": 1, "tier": "lmstudio"},
+            # A separate CPU VM: slow, but contends with nothing.
+            "oracle": {"worker": "cc-delegate", "profile": "oracle-coder",
+                       "maxWriteJobs": 2, "tier": "oracle"},
+        },
+        # Preferred lanes per task class, best first. A lane that is busy,
+        # unavailable or excluded is skipped, so this is a preference, not a
+        # pin. Reorder freely -- e.g. put codex first everywhere to keep local
+        # models idle while the subscription lasts.
+        "classRouting": {
+            "hard": ["codex", "station"],
+            "standard": ["codex", "station", "oracle"],
+            "simple": ["station", "oracle", "codex"],
+            "tiny": ["oracle", "station"],
+        },
+        "defaultClass": "standard",
+        "totalWriteJobsPerRepo": 3,
         "maxReadOnlyJobs": 3,
-        # A worker past this is SLOW, not failed (§28). No hard kill by default.
+        # How long a lane's availability probe is trusted, so dispatch does not
+        # re-probe a slow remote every time.
+        "laneProbeTtlSeconds": 60,
+        # A worker past this is SLOW, not failed. No hard kill by default.
         "slowAfterSeconds": 900,
         "hardTimeoutSeconds": 0,
         "minCheckSpacingSeconds": 60,
@@ -107,12 +133,34 @@ def _merge(base: dict, over: dict) -> dict:
 
 
 def load() -> dict[str, Any]:
-    if CONFIG_PATH.exists():
-        try:
-            return _merge(DEFAULTS, json.loads(CONFIG_PATH.read_text("utf-8")))
-        except (OSError, ValueError):
-            pass
-    return json.loads(json.dumps(DEFAULTS))
+    """Defaults with the user's config merged over them.
+
+    A config written against an older schema is retired rather than merged:
+    the v1 shape keyed worker capacity by tool, and silently merging those keys
+    over the new lane model would cap concurrency at the old numbers. The old
+    file is kept beside the new one so nothing is lost.
+    """
+    if not CONFIG_PATH.exists():
+        return json.loads(json.dumps(DEFAULTS))
+    try:
+        stored = json.loads(CONFIG_PATH.read_text("utf-8"))
+    except (OSError, ValueError):
+        return json.loads(json.dumps(DEFAULTS))
+    if int(stored.get("schemaVersion", 1)) < DEFAULTS["schemaVersion"]:
+        _retire(stored)
+        return json.loads(json.dumps(DEFAULTS))
+    return _merge(DEFAULTS, stored)
+
+
+def _retire(stored: dict) -> None:
+    import time
+    bak = CONFIG_PATH.with_suffix(f".v{stored.get('schemaVersion', 1)}."
+                                  f"{time.strftime('%Y%m%d-%H%M%S')}.json")
+    try:
+        bak.write_text(json.dumps(stored, indent=2), "utf-8")
+        CONFIG_PATH.write_text(json.dumps(DEFAULTS, indent=2), "utf-8")
+    except OSError:
+        pass
 
 
 def ensure_home() -> Path:

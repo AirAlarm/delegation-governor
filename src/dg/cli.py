@@ -179,7 +179,7 @@ def cmd_add(args) -> int:
     tid = store.create_task(
         con, title=args.title, mode=args.mode, goal=args.goal or args.title,
         repo=args.repo or os.getcwd(), paths=args.path or [], depends_on=args.depends_on or [],
-        priority=args.priority)
+        priority=args.priority, task_class=args.task_class)
     print(tid)
     return 0
 
@@ -254,7 +254,18 @@ def cmd_dispatch(args) -> int:
         print(f"{args.id} is {view[args.id]['state']}: {view[args.id]['reason']}", file=sys.stderr)
         return 2
 
-    worker = args.worker or routing.select(con, cfg)["worker"]
+    from . import lanes as lanes_mod
+    if args.worker:
+        lane_choice = {"lane": None, "worker": args.worker, "profile": None,
+                       "taskClass": t.get("taskClass"), "reason": "explicit --worker"}
+    else:
+        lane_choice = routing.select_for(con, cfg, t)
+        if lane_choice["worker"] is None:
+            print(f"{args.id}: {lane_choice['reason']}", file=sys.stderr)
+            for sk in lane_choice.get("skipped", []):
+                print(f"  {sk}", file=sys.stderr)
+            return 6
+    worker = lane_choice["worker"]
     if worker == routing.CC_DELEGATE:
         # cc-delegate is MCP-only: hand Claude the work order and the profile,
         # then `dg attach` once run_dev_task returns its task id.
@@ -263,7 +274,11 @@ def cmd_dispatch(args) -> int:
         order = _order(t, args, "the isolated git worktree cc-delegate places you in")
         print(json.dumps({"worker": "cc-delegate", "action": "call mcp run_dev_task",
                           "taskId": t["id"], "repo": t["repo"],
-                          "then": f"dg attach {t['id']} <cc-task-id>",
+                          "lane": lane_choice.get("lane"),
+                          "profile": lane_choice.get("profile"),
+                          "taskClass": lane_choice.get("taskClass"),
+                          "then": f"dg attach {t['id']} <cc-task-id> "
+                                  f"--lane {lane_choice.get('lane') or ''}".rstrip(),
                           "workOrder": order}, indent=2))
         return 0
 
@@ -275,13 +290,18 @@ def cmd_dispatch(args) -> int:
         return 4
 
     order = _order(t, args, "(the working directory below)")
-    res = codex_worker.dispatch(con, t, order, _session_id(), sandbox=args.sandbox)
+    res = codex_worker.dispatch(con, t, order, _session_id(), sandbox=args.sandbox,
+                                lane=lane_choice.get("lane") or "codex")
     if not res.get("ok"):
         store.release(con, args.id)
         print(res.get("error", "dispatch failed"), file=sys.stderr)
         return 5
     res["task"] = args.id
+    res["lane"] = lane_choice.get("lane")
+    res["taskClass"] = lane_choice.get("taskClass")
+    lanes_mod.invalidate(con)
     res["nextReady"] = [r["id"] for r in scheduler.ready(scheduler.evaluate(con, cfg)["tasks"])]
+    res["freeLanes"] = lanes_mod.free_lanes(con, cfg, t["repo"])
     return _emit(res, True)
 
 
@@ -301,7 +321,10 @@ def cmd_attach(args) -> int:
         return 1
     if t["status"] == "PLANNED":
         store.claim(con, args.id, _session_id(), routing.CC_DELEGATE)
-    res = cc_delegate.attach(con, t, args.cc_task_id, args.work_order or "(recorded by Claude)")
+    res = cc_delegate.attach(con, t, args.cc_task_id,
+                             args.work_order or "(recorded by Claude)", lane=args.lane)
+    from . import lanes as lanes_mod
+    lanes_mod.invalidate(con)
     return _emit(res, True)
 
 
@@ -517,6 +540,92 @@ def cmd_launch(args) -> int:
     return launcher.run(cfg, args.claude_args, dry_run=args.dry_run, force=args.force)
 
 
+def cmd_fill(args) -> int:
+    """Start one READY task in every free lane, best task first.
+
+    The scheduler already allows Codex, the GPU box and the VM to run at once;
+    this is what actually puts work in all three instead of one at a time.
+    """
+    from . import lanes as lanes_mod
+    con = store.connect()
+    cfg = _cfg_with_overrides(con)
+    repo = os.path.abspath(args.repo or os.getcwd())
+    sync.reconcile(con, cfg)
+
+    started: list[dict[str, Any]] = []
+    handoff: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    avail = lanes_mod.availability(con, cfg)
+
+    while True:
+        if args.max and len(started) + len(handoff) >= args.max:
+            break
+        rows = scheduler.evaluate(con, cfg)["tasks"]
+        candidates = [r for r in scheduler.ready(rows)
+                      if not r["repo"] or r["repo"] == repo]
+        candidates = [r for r in candidates
+                      if r["id"] not in {x["task"] for x in started + handoff + skipped}]
+        if not candidates:
+            break
+        task = candidates[0]
+        choice = lanes_mod.choose(con, cfg, task, avail)
+        if choice["lane"] is None:
+            skipped.append({"task": task["id"], "reason": choice["reason"],
+                            "detail": choice["skipped"]})
+            continue
+        entry = {"task": task["id"], "title": task["title"], "lane": choice["lane"],
+                 "worker": choice["worker"], "class": choice["taskClass"]}
+        if args.dry_run:
+            started.append(entry)
+            continue
+        if choice["worker"] == routing.CC_DELEGATE:
+            # MCP-only: hand Claude the order, it submits and then `dg attach`.
+            entry["profile"] = choice["profile"]
+            entry["workOrder"] = workorder.build(
+                task, cwd="the isolated git worktree cc-delegate places you in")
+            entry["then"] = f"dg attach {task['id']} <cc-task-id> --lane {choice['lane']}"
+            handoff.append(entry)
+            # Reserve the lane so the next pick does not choose it again.
+            avail[choice["lane"]] = [False, "reserved for a pending hand-off"]
+            continue
+        if not store.claim(con, task["id"], _session_id(), choice["worker"]):
+            skipped.append({"task": task["id"], "reason": "claimed by another session"})
+            continue
+        order = workorder.build(task, cwd="(the working directory below)")
+        res = codex_worker.dispatch(con, task, order, _session_id(), lane=choice["lane"])
+        if not res.get("ok"):
+            store.release(con, task["id"])
+            skipped.append({"task": task["id"], "reason": res.get("error", "dispatch failed")})
+            continue
+        entry.update(pid=res.get("pid"), worktree=res.get("worktree"))
+        started.append(entry)
+        lanes_mod.invalidate(con)
+        avail = lanes_mod.availability(con, cfg)
+
+    out = {"started": started, "handoff": handoff, "skipped": skipped,
+           "freeLanes": lanes_mod.free_lanes(con, cfg, repo)}
+    if handoff:
+        out["next"] = ("call mcp run_dev_task for each handoff entry with its profile, "
+                       "then run its `then` command")
+    return _emit(out, True)
+
+
+def cmd_lanes(args) -> int:
+    from . import lanes as lanes_mod
+    con = store.connect()
+    cfg = _cfg_with_overrides(con)
+    rows = lanes_mod.summary(con, cfg, os.path.abspath(args.repo or os.getcwd()))
+    if args.json:
+        return _emit(rows, True)
+    out = []
+    for r in rows:
+        mark = "ok  " if r["available"] else "DOWN"
+        out.append(f"[{mark}] {r['lane']:<9} {r['running']}/{r['max']} running  "
+                   f"{','.join(r['classes']):<24} {r['profile'] or r['worker']:<14} "
+                   f"{'' if r['available'] else r['reason']}")
+    return _emit(None, False, chr(10).join(out))
+
+
 def cmd_proxy(args) -> int:
     from . import proxy
     con = store.connect()
@@ -618,6 +727,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--path", action="append", help="path glob this task owns (repeatable)")
     s.add_argument("--depends-on", action="append")
     s.add_argument("--priority", type=int, default=0)
+    s.add_argument("--class", dest="task_class", default="standard",
+                   choices=["tiny", "simple", "standard", "hard"],
+                   help="how demanding the work is; picks the lane "
+                        "(tiny/simple -> local boxes, hard -> codex)")
 
     s = add("set", cmd_set, help="force a task status")
     s.add_argument("id")
@@ -647,6 +760,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("id")
     s.add_argument("cc_task_id")
     s.add_argument("--work-order", default="")
+    s.add_argument("--lane", default=None, help="which lane it occupies (station/oracle)")
 
     s = add("fallback", cmd_fallback, help="supersede a failed task with a clean retry")
     s.add_argument("id")
@@ -684,6 +798,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start on Anthropic even when the supervisor says LOCAL "
                         "and LM Studio is unusable")
     s.add_argument("claude_args", nargs=argparse.REMAINDER)
+
+    s = add("lanes", cmd_lanes, help="worker lanes: capacity, availability, classes")
+    s.add_argument("--repo", default="")
+    s.add_argument("--json", action="store_true")
+
+    s = add("fill", cmd_fill,
+            help="start one READY task in every free lane, non-blocking")
+    s.add_argument("--repo", default="")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--max", type=int, default=0, help="cap how many to start")
 
     s = add("proxy", cmd_proxy,
             help="router proxy: per-request failover, works inside Claude Desktop")

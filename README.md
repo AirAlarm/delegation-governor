@@ -113,7 +113,10 @@ dg integrate $A --cleanup
 | `dg doctor` | environment health |
 | `dg tasks [ready\|running\|blocked]` | the ledger |
 | `dg show <id>` / `dg graph [<id>]` | one task / dependency edges |
-| `dg add` / `dg set` | create / force a status |
+| `dg add --class tiny\|simple\|standard\|hard` | create a task, sized to a lane |
+| `dg lanes` | machines: capacity, availability, which classes go where |
+| `dg fill` | start one READY task in **every** free lane |
+| `dg set` | force a status |
 | `dg workorder <id>` | render the bounded contract |
 | `dg dispatch <id>` | claim + start, non-blocking |
 | `dg attach <id> <cc-task-id>` | register a cc-delegate job |
@@ -191,9 +194,26 @@ stored anywhere.
 
 ## Concurrency
 
+Work is scheduled onto **lanes** -- machines, not tools:
+
+| Lane | Machine | Slots | Takes |
+|---|---|---|---|
+| `codex` | cloud | 1 | `hard`, `standard`, `simple` |
+| `station` | the GPU box (one resident model) | 1 | all classes |
+| `oracle` | a separate CPU VM | 2 | `tiny`, `simple`, `standard` |
+
+`station` and `oracle` both go through cc-delegate but are different computers,
+so they run concurrently. Tasks carry a class (`--class`) and routing prefers
+the lane that suits them, falling through when one is busy or down -- so a
+trivial edit does not consume the Codex slot a hard task needs.
+
+`dg fill` starts one READY task in every free lane at once.
+
 - Path ownership: two WRITE tasks with overlapping globs in the same repo never
   run together. A task with no declared paths owns the whole repo.
-- Capacity: per-worker and per-repo write limits, plus a read-only cap.
+- Capacity: per-lane slots plus a per-repo total, and a read-only cap.
+- While the supervisor is running on the GPU box, the `station` lane is
+  excluded automatically -- they would evict each other's model.
 - Atomic claiming: `BEGIN IMMEDIATE`, so two sessions cannot claim one task.
 - WRITE work runs in a git worktree **outside** your repo, branched from the
   current commit. Your working tree is never touched, not even on failure.

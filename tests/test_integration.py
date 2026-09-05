@@ -136,6 +136,7 @@ class TestMultipleWorkers(DGTest):
                                                         self.cfg))
 
     def test_capacity_stops_a_third_write_job(self):
+        self.cfg["workers"]["totalWriteJobsPerRepo"] = 2  # pin: tests the cap, not its value
         repo = make_repo()
         a = self.task("a", paths=["x/**"], repo=repo)
         b = self.task("b", paths=["y/**"], repo=repo)
@@ -417,3 +418,37 @@ class TestCleanupPreservesWork(DGTest):
         b = self.task("B", repo=repo, paths=["test_calc.py"])
         wt2 = gitutil.create_worktree(repo, b)
         self.assertIn("subtract", Path(wt2["worktree"], "calc.py").read_text())
+
+
+class TestNoChangeOutcome(DGTest):
+    """A worker that declines a task exits clean and writes nothing. That is
+    not a failure, but it must not read as completed work either."""
+
+    def test_write_task_with_no_diff_is_flagged(self):
+        from dg.workers import codex_runner
+        repo = make_repo()
+        a = self.task("vague", repo=repo, paths=["src/**"])
+        wt = gitutil.create_worktree(repo, a)
+        att = store.add_attempt(self.con, a, "codex", worktree=wt["worktree"])
+        codex_runner._record(
+            self.con, {"taskId": a, "attemptId": att, "repo": repo,
+                       "worktree": wt["worktree"], "cwd": wt["worktree"]},
+            {"status": "SUCCEEDED", "errorKind": None, "resetsAt": None},
+            [{"item": {"text": "Blocked: the spec gives no target behaviour."}}], None)
+        t = store.get_task(self.con, a)
+        self.assertEqual(t["status"], "SUCCEEDED")
+        self.assertIn("changed no files", t["failureReason"])
+
+    def test_real_changes_are_not_flagged(self):
+        from dg.workers import codex_runner
+        repo = make_repo()
+        a = self.task("real", repo=repo, paths=["src/**"])
+        wt = gitutil.create_worktree(repo, a)
+        Path(wt["worktree"], "new.py").write_text("x = 1\n")
+        att = store.add_attempt(self.con, a, "codex", worktree=wt["worktree"])
+        codex_runner._record(
+            self.con, {"taskId": a, "attemptId": att, "repo": repo,
+                       "worktree": wt["worktree"], "cwd": wt["worktree"]},
+            {"status": "SUCCEEDED", "errorKind": None, "resetsAt": None},
+            [{"item": {"text": "added new.py"}}], None)
+        self.assertIsNone(store.get_task(self.con, a)["failureReason"])

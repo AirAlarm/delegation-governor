@@ -106,13 +106,40 @@ def _auth_headers(t: dict) -> dict[str, str]:
             "anthropic-version": "2023-06-01"}
 
 
-def probe_tier(t: dict) -> tuple[bool, str]:
-    """Is this tier usable right now? Zero inference.
+def probe_tier(t: dict, load: bool = False) -> tuple[bool, str]:
+    """Is this tier usable right now? Zero inference, and by default zero side
+    effects.
 
-    A deliberately invalid body draws an Anthropic-shaped `invalid_request_error`
-    without starting a completion. LM Studio answers unknown paths with a
-    generic 200, so the error *shape* is the discriminator, not the status code.
+    LM Studio is checked with a plain GET to `/api/v0/models`, which also
+    reports residency and loaded context. An earlier version POSTed an empty
+    body to `/v1/messages` to draw an Anthropic-shaped error -- that worked,
+    but it logged a red `invalid_request_error` in the user's LM Studio window
+    on every probe, which is a poor trade for information a GET already gives.
+    The POST check still exists in `dg doctor`, where it runs once and the
+    question ("does this really speak the Messages API?") is the actual point.
+
+    Remote tiers have no equivalent listing endpoint, so they keep the invalid
+    POST -- it is cheap, and nobody is watching that box's console.
+
+    `load=True` additionally makes an LM Studio tier's model resident. That is
+    only wanted when actually starting a supervisor there: loading during a
+    routine check pins a multi-GB model at supervisor context and makes
+    cc-delegate's own model gate time out swapping it -- observed live as a
+    failed delegated task.
     """
+    if t.get("kind") == "lmstudio":
+        state, loaded, _ = model_context(t)
+        if state == "unknown":
+            return False, f"{t['name']}: {t['baseUrl']} unreachable or model not served"
+        if load:
+            return ensure_local_model(t)
+        need = t.get("minContextLength", 0)
+        if state == "loaded" and loaded and loaded < need:
+            return False, (f"{t['name']}: {t['model']} loaded with only {loaded} ctx "
+                           f"(need {need}); dg launch will reload it")
+        return True, (f"{t['name']}: {t['baseUrl']} reachable, {t['model']} {state}"
+                      + ("" if state == "loaded" else " (loads on demand)"))
+
     import urllib.error
     import urllib.request
     url = t["baseUrl"].rstrip("/") + "/v1/messages"
@@ -134,17 +161,18 @@ def probe_tier(t: dict) -> tuple[bool, str]:
         return False, f"{t['name']}: {t['baseUrl']} unreachable ({type(e).__name__})"
     if not (body.get("type") == "error" or "error" in body):
         return False, f"{t['name']}: not an Anthropic Messages endpoint ({str(body)[:100]})"
-    if t.get("kind") == "lmstudio":
-        return ensure_local_model(t)
     return True, f"{t['name']}: {t['baseUrl']} ready ({t['model']})"
 
 
-def first_usable_tier(cfg: dict) -> tuple[dict | None, list[str]]:
+def first_usable_tier(cfg: dict, load: bool = False) -> tuple[dict | None, list[str]]:
     """Walk tiers in order; the first that answers wins. Also returns why the
-    earlier ones did not, so a failure explains itself."""
+    earlier ones did not, so a failure explains itself.
+
+    `load=True` is for `dg launch`, which genuinely needs the model resident.
+    """
     why: list[str] = []
     for t in tiers(cfg):
-        ok, detail = probe_tier(t)
+        ok, detail = probe_tier(t, load=load)
         if ok:
             return t, why
         why.append(detail)
@@ -353,7 +381,7 @@ def run(cfg: dict, claude_args: list[str], dry_run: bool = False,
     while True:
         chosen = None
         if route == LOCAL:
-            chosen, why = first_usable_tier(cfg)
+            chosen, why = first_usable_tier(cfg, load=True)
             if chosen is None:
                 # Clear recovery path beats a restart loop into a dead endpoint.
                 print(_no_tier_help(cfg, why), file=sys.stderr)

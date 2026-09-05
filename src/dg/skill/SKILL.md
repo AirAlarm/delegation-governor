@@ -28,14 +28,19 @@ PLAN -> LEDGER -> DISPATCH -> DON'T WAIT -> OTHER READY WORK
    ambiguity, dangerous changes, final review: yours. See `references/rubric.md`.
 5. **Bounded work orders only.** Never paste conversation history to a worker.
    `dg workorder <id>` renders the contract; the worker reads the repo itself.
+6. **Classify tasks and fill every lane.** Codex, the GPU box and the VM are
+   three separate machines. `--class tiny|simple|standard|hard` decides which
+   one; `dg fill` puts work in all of them instead of one at a time.
 
 ## Minimum commands
 
 ```bash
 dg status                  # supervisor, worker, task counts
-dg add "title" --mode WRITE --repo . --path 'src/auth/**' --depends-on DG-3
+dg add "title" --class simple --repo . --path 'src/auth/**' --depends-on DG-3
 dg tasks ready             # what to do right now, best first
-dg dispatch DG-4           # claim + start a worker, returns immediately
+dg lanes                   # which machines are free
+dg fill                    # start work in EVERY free lane at once
+dg dispatch DG-4           # or just one; returns immediately
 dg collect DG-4            # result, once you need it
 dg integrate DG-4 --cleanup
 ```

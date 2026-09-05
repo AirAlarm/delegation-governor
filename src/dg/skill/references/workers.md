@@ -1,8 +1,43 @@
-# Workers
+# Workers and lanes
 
-Preference: **Codex first, cc-delegate when Codex cannot serve.**
+A **lane** is a machine, not a tool. Three of them, and they run at the same
+time:
 
-`dg route` says which one you would get and why. `dg dispatch` picks for you.
+| Lane | Machine | Good for |
+|---|---|---|
+| `codex` | cloud | `hard`, `standard` |
+| `station` | the GPU box (one model resident) | `simple`, and anything |
+| `oracle` | a separate CPU VM, slow | `tiny`, `simple` |
+
+`station` and `oracle` are both reached through cc-delegate but are different
+computers, so they never contend.
+
+## Classify every task
+
+```bash
+dg add "port 14 call sites" --class simple --path 'src/api/**'
+dg add "fix the auth race"  --class hard   --path 'src/auth/**'
+```
+
+`tiny | simple | standard | hard`. This is the whole point: a trivial edit sent
+to `codex` burns the slot a hard task needs, and leaves both local boxes idle.
+Guess `standard` only when you genuinely cannot tell.
+
+## Fill every lane
+
+```bash
+dg fill              # start one READY task in each free lane
+dg lanes             # who is busy, who is down, which classes go where
+```
+
+`dg fill` starts Codex work itself and hands back a work order for each
+cc-delegate lane, with the profile to use and the `dg attach ... --lane` to run
+afterwards. Submit those with `run_dev_task`, then attach.
+
+`dg dispatch <id>` still does one task, choosing its lane the same way.
+
+Preference is by class, then capacity, then availability -- so a busy or dead
+lane falls through to the next rather than blocking.
 
 ## Codex
 

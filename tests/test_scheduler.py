@@ -119,6 +119,7 @@ class TestPathConflicts(DGTest):
 
 class TestCapacity(DGTest):
     def test_write_capacity_per_repo(self):
+        self.cfg["workers"]["totalWriteJobsPerRepo"] = 2  # pin: this tests the cap, not its value
         a = self.task("a", paths=["one/**"])
         b = self.task("b", paths=["two/**"])
         c = self.task("c", paths=["three/**"])

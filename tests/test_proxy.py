@@ -144,7 +144,7 @@ class TestRouting(ProxyTest):
         self.cfg["supervisorFallbacks"] = [
             {"name": "lmstudio", "kind": "remote", "baseUrl": up.url,
              "model": "local/main", "smallModel": "local/small"}]
-        launcher.probe_tier = lambda t: (True, "fake ok")
+        launcher.probe_tier = lambda t, load=False: (True, "fake ok")
         self.quota(10, 10)
         supervisor.record_hard_limit(self.con, "rate_limit")
         router = self.start_proxy(self.cfg)
@@ -161,7 +161,7 @@ class TestRouting(ProxyTest):
         self.cfg["supervisorFallbacks"] = [
             {"name": "lmstudio", "kind": "remote", "baseUrl": up.url,
              "model": "local/main", "tokenEnvVar": "DG_TEST_TIER_KEY"}]
-        launcher.probe_tier = lambda t: (True, "fake ok")
+        launcher.probe_tier = lambda t, load=False: (True, "fake ok")
         supervisor.record_hard_limit(self.con, "rate_limit")
         self.start_proxy(self.cfg)
         self.post(headers={"authorization": "Bearer sk-ant-oat01-SECRET",
@@ -173,7 +173,7 @@ class TestRouting(ProxyTest):
 
     def test_no_usable_tier_falls_back_to_anthropic(self):
         """Anthropic's own error is more useful than one we invent."""
-        launcher.first_usable_tier = lambda cfg: (None, ["nothing answered"])
+        launcher.first_usable_tier = lambda cfg, load=False: (None, ["nothing answered"])
         supervisor.record_hard_limit(self.con, "rate_limit")
         router = proxy.Router(self.cfg, reload=False)
         kind, tier, reason = router.route()
@@ -182,7 +182,7 @@ class TestRouting(ProxyTest):
 
     def test_tier_choice_is_cached_briefly(self):
         calls = []
-        launcher.first_usable_tier = lambda cfg: (calls.append(1), ({"name": "x"}, []))[1]
+        launcher.first_usable_tier = lambda cfg, load=False: (calls.append(1), ({"name": "x"}, []))[1]
         supervisor.record_hard_limit(self.con, "rate_limit")
         router = proxy.Router(self.cfg, reload=False)
         for _ in range(5):

@@ -1,0 +1,186 @@
+"""Lanes: the scarce resources work actually competes for.
+
+A lane is a *machine*, not a tool. `station` and `oracle` are both reached
+through cc-delegate, but they are different computers and can run at the same
+time -- modelling them as one worker gave them a shared slot and left the VM
+idle whenever the GPU was busy.
+
+    codex     cloud, contends with nothing local
+    station   the GPU box; one model resident at a time, so one job
+    oracle    a separate CPU VM; slow, contends with nothing
+
+Routing picks a lane by task class first and availability second, so a trivial
+edit does not consume the Codex slot that a hard task needs.
+"""
+from __future__ import annotations
+
+import os
+import sqlite3
+from typing import Any
+
+from . import quota_codex, store
+
+CLASSES = ("tiny", "simple", "standard", "hard")
+_PROBE_KEY = "laneProbes"
+
+
+def lanes(cfg: dict) -> dict[str, dict]:
+    return cfg["workers"]["lanes"]
+
+
+def normalise_class(value: str | None, cfg: dict) -> str:
+    v = (value or "").strip().lower()
+    return v if v in CLASSES else cfg["workers"].get("defaultClass", "standard")
+
+
+def preference(task_class: str, cfg: dict) -> list[str]:
+    """Ordered lane preference for a class, filtered to lanes that exist."""
+    table = cfg["workers"]["classRouting"]
+    order = table.get(task_class) or table.get("standard") or list(lanes(cfg))
+    known = lanes(cfg)
+    return [name for name in order if name in known]
+
+
+# ---------------------------------------------------------------- capacity
+
+def _norm_repo(repo: str) -> str:
+    """Repos are stored absolute; accept either form from callers."""
+    return os.path.abspath(repo) if repo else ""
+
+
+def in_flight(con: sqlite3.Connection, repo: str) -> dict[str, int]:
+    """Running WRITE attempts per lane in this repo."""
+    repo = _norm_repo(repo)
+    counts: dict[str, int] = {}
+    for a in store.running_attempts(con):
+        if a["task_mode"] != "WRITE" or a["repo"] != repo:
+            continue
+        lane = a["lane"] or _lane_for_worker(a["worker"])
+        counts[lane] = counts.get(lane, 0) + 1
+    return counts
+
+
+def _lane_for_worker(worker: str) -> str:
+    """Attempts predating lanes still need a bucket."""
+    return "codex" if worker == "codex" else "station"
+
+
+def has_capacity(con: sqlite3.Connection, lane: str, repo: str, cfg: dict) -> bool:
+    spec = lanes(cfg).get(lane)
+    if spec is None:
+        return False
+    counts = in_flight(con, _norm_repo(repo))
+    if counts.get(lane, 0) >= spec.get("maxWriteJobs", 1):
+        return False
+    total = sum(counts.values())
+    return total < cfg["workers"]["totalWriteJobsPerRepo"]
+
+
+# ---------------------------------------------------------------- availability
+
+def availability(con: sqlite3.Connection, cfg: dict, refresh: bool = True) -> dict[str, Any]:
+    """{lane: (ok, reason)} -- cached, because probing a remote VM is slow.
+
+    The cache is what keeps dispatch cheap: without it every `dg tasks` would
+    pay a round trip to the Oracle box.
+    """
+    ttl = cfg["workers"].get("laneProbeTtlSeconds", 60)
+    cached = store.kv_get(con, _PROBE_KEY) or {}
+    age = store.kv_age(con, _PROBE_KEY)
+    if cached and age is not None and age < ttl and not refresh:
+        return cached
+    if cached and age is not None and age < ttl:
+        return cached
+
+    from . import launcher, supervisor
+    out: dict[str, Any] = {}
+    sup = supervisor.evaluate(con, cfg)
+    local_supervisor_tier = None
+    if sup["state"] == supervisor.LOCAL:
+        chosen, _ = launcher.first_usable_tier(cfg)
+        local_supervisor_tier = (chosen or {}).get("name")
+
+    for name, spec in lanes(cfg).items():
+        if spec["worker"] == "codex":
+            st = quota_codex.refresh(con, cfg)["state"]
+            out[name] = [st == quota_codex.READY,
+                         "codex ready" if st == quota_codex.READY else st]
+            continue
+        tier_name = spec.get("tier")
+        if tier_name and tier_name == local_supervisor_tier:
+            # The supervisor is running on that machine; a worker there would
+            # evict its model. Observed live as a cc-delegate gate timeout.
+            out[name] = [False, f"{tier_name} is hosting the local supervisor"]
+            continue
+        t = launcher.tier(cfg, tier_name) if tier_name else None
+        if t is None:
+            out[name] = [True, "no tier probe configured"]
+            continue
+        ok, detail = launcher.probe_tier(t)
+        out[name] = [ok, detail]
+
+    store.kv_set(con, _PROBE_KEY, out)
+    return out
+
+
+def invalidate(con: sqlite3.Connection) -> None:
+    store.kv_set(con, _PROBE_KEY, {})
+
+
+# ---------------------------------------------------------------- selection
+
+def choose(con: sqlite3.Connection, cfg: dict, task: dict[str, Any],
+           avail: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Best lane for one task, or why none is usable.
+
+    Preference by class, then capacity, then availability. A manual worker
+    override still wins -- it pins the tool, and the first lane using that tool
+    is taken.
+    """
+    task_class = normalise_class(task.get("taskClass"), cfg)
+    order = preference(task_class, cfg)
+    override = cfg["overrides"]["worker"]
+    if override != "auto":
+        order = [n for n in order if lanes(cfg)[n]["worker"] == override] or [
+            n for n, s in lanes(cfg).items() if s["worker"] == override]
+
+    if avail is None:
+        avail = availability(con, cfg)
+    repo = task.get("repo") or ""
+    skipped: list[str] = []
+    for name in order:
+        ok, reason = avail.get(name, [True, "unprobed"])
+        if not ok:
+            skipped.append(f"{name}: {reason}")
+            continue
+        if task["mode"] == "WRITE" and not has_capacity(con, name, repo, cfg):
+            skipped.append(f"{name}: at capacity")
+            continue
+        spec = lanes(cfg)[name]
+        return {"lane": name, "worker": spec["worker"], "profile": spec.get("profile"),
+                "taskClass": task_class, "skipped": skipped,
+                "reason": f"{task_class} -> {name}"}
+    return {"lane": None, "worker": None, "taskClass": task_class, "skipped": skipped,
+            "reason": f"no lane available for a {task_class} task"}
+
+
+def free_lanes(con: sqlite3.Connection, cfg: dict, repo: str,
+               avail: dict[str, Any] | None = None) -> list[str]:
+    if avail is None:
+        avail = availability(con, cfg)
+    repo = _norm_repo(repo)
+    return [n for n in lanes(cfg)
+            if avail.get(n, [True, ""])[0] and has_capacity(con, n, repo, cfg)]
+
+
+def summary(con: sqlite3.Connection, cfg: dict, repo: str = "") -> list[dict[str, Any]]:
+    avail = availability(con, cfg)
+    counts = in_flight(con, repo) if repo else {}
+    out = []
+    for name, spec in lanes(cfg).items():
+        ok, reason = avail.get(name, [True, "unprobed"])
+        out.append({"lane": name, "worker": spec["worker"], "profile": spec.get("profile"),
+                    "available": ok, "reason": reason,
+                    "running": counts.get(name, 0), "max": spec.get("maxWriteJobs", 1),
+                    "classes": [c for c in CLASSES if name in preference(c, cfg)]})
+    return out
