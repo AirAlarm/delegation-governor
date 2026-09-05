@@ -31,18 +31,30 @@ K_HARD = "claudeHardLimit"
 
 
 def _window(raw: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Accept both the installed shape (utilization) and the older
-    used_percentage spelling, so a Claude Code upgrade cannot silently
-    turn a real number into 'unknown'."""
+    """Normalise one window to a 0-100 percentage.
+
+    `utilization` is a **fraction 0..1**, not a percentage: Claude Code renders
+    it as `Math.floor(utilization * 100)` and warns below `utilization < 0.7`.
+    Comparing it directly against percentage thresholds silently disables the
+    whole supervisor, so the scale is converted here, at the one place the
+    field enters the system.
+
+    The older `used_percentage` spelling is already a percentage and is
+    accepted unscaled, so a Claude Code change in either direction still
+    parses rather than reading as 'unknown'.
+    """
     if not isinstance(raw, dict):
         return None
     used = raw.get("utilization")
-    if used is None:
+    if isinstance(used, (int, float)):
+        used = float(used) * 100.0
+    else:
         used = raw.get("used_percentage")
-    if not isinstance(used, (int, float)):
-        return None
+        if not isinstance(used, (int, float)):
+            return None
+        used = float(used)
     resets = raw.get("resets_at")
-    return {"usedPercent": float(used),
+    return {"usedPercent": used,
             "resetsAt": int(resets) if isinstance(resets, (int, float)) else None}
 
 

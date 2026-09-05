@@ -440,6 +440,23 @@ def cmd_doctor(args) -> int:
         if contention:
             warn("lm studio single model slot", contention)
 
+    from . import proxy as proxy_mod
+    port = cfg["proxy"]["port"]
+    h = proxy_mod.health(port, timeout=1.5)
+    from . import install as install_mod
+    env_cur, env_ours = install_mod.proxy_env_state(port)
+    if env_ours:
+        # Claude is routed through the proxy, so the proxy MUST be up.
+        chk(f"router proxy :{port}", h is not None,
+            f"serving {h.get('stats')}" if h else
+            "ANTHROPIC_BASE_URL points here but nothing is listening -- "
+            "run `dg proxy` (SessionStart normally does)")
+        chk("claude routed through router", True, f"{env_cur} (Desktop failover active)")
+    else:
+        chk("router proxy", True,
+            (f"running on :{port}, not wired in" if h else f"not running (:{port})")
+            + "; `dg install --proxy` routes Claude through it for Desktop failover")
+
     lp = store.kv_get(con, "launcher") or {}
     if lp:
         chk("last dg launch", True,
@@ -500,6 +517,23 @@ def cmd_launch(args) -> int:
     return launcher.run(cfg, args.claude_args, dry_run=args.dry_run, force=args.force)
 
 
+def cmd_proxy(args) -> int:
+    from . import proxy
+    con = store.connect()
+    cfg = _cfg_with_overrides(con)
+    port = args.port or cfg["proxy"]["port"]
+    if args.status:
+        h = proxy.health(port)
+        return _emit(h or {"running": False, "port": port}, True)
+    if args.stop:
+        print("stop the `dg proxy` process directly (Ctrl-C, or kill its PID)",
+              file=sys.stderr)
+        return 1
+    if (h := proxy.health(port)) and not args.force:
+        return _emit({**h, "note": f"a dg proxy is already listening on {port}"}, True)
+    return proxy.serve(cfg, port)
+
+
 def cmd_hook(args) -> int:
     from . import hooks
     return hooks.run(args.name)
@@ -535,7 +569,7 @@ def cmd_test(args) -> int:
 
 def cmd_install(args) -> int:
     from . import install
-    return install.run(dry_run=args.dry_run)
+    return install.run(dry_run=args.dry_run, proxy=args.proxy)
 
 
 def cmd_uninstall(args) -> int:
@@ -651,14 +685,25 @@ def build_parser() -> argparse.ArgumentParser:
                         "and LM Studio is unusable")
     s.add_argument("claude_args", nargs=argparse.REMAINDER)
 
+    s = add("proxy", cmd_proxy,
+            help="router proxy: per-request failover, works inside Claude Desktop")
+    s.add_argument("--port", type=int)
+    s.add_argument("--status", action="store_true")
+    s.add_argument("--stop", action="store_true")
+    s.add_argument("--force", action="store_true", help="start even if one seems to be running")
+
     s = add("hook", cmd_hook, help="Claude Code integration points (used by settings.json)")
-    s.add_argument("name", choices=["statusline", "prompt", "stopfailure"])
+    s.add_argument("name", choices=["statusline", "prompt", "stopfailure", "session"])
 
     s = add("test", cmd_test, help="run the test suite")
     s.add_argument("-v", "--verbose", action="store_true")
 
     s = add("install", cmd_install, help="install hooks, skill and statusline")
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--proxy", action="store_true",
+                   help="also route Claude through the local router by setting a "
+                        "persistent user ANTHROPIC_BASE_URL (needed for Claude Desktop "
+                        "failover)")
     s = add("uninstall", cmd_uninstall, help="remove them again")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--purge", action="store_true", help="also delete governor state")

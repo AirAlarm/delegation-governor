@@ -162,7 +162,50 @@ def stopfailure() -> int:
     return 0
 
 
-HOOKS = {"statusline": statusline, "prompt": prompt, "stopfailure": stopfailure}
+def session() -> int:
+    """SessionStart: make sure the router proxy is up.
+
+    ANTHROPIC_BASE_URL is set persistently once, so a session must never find a
+    dead port there. Starting it here means every Claude Code session -- Desktop
+    included -- self-heals before its first request.
+    """
+    _stdin_json()
+    try:
+        con, cfg = _load()
+        if not cfg["proxy"].get("autoStart", True):
+            return 0
+        from . import proxy
+        port = cfg["proxy"]["port"]
+        if proxy.health(port, timeout=1.0):
+            return 0
+        _spawn_proxy(port)
+    except Exception:
+        return 0
+    return 0
+
+
+def _spawn_proxy(port: int) -> None:
+    """Detached, so it outlives the session that started it."""
+    import os
+    import shutil
+    import subprocess
+    exe = shutil.which("dg")
+    if not exe:
+        return
+    kw: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        kw["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                               | getattr(subprocess, "DETACHED_PROCESS", 0))
+    else:
+        kw["start_new_session"] = True
+    # The proxy must not inherit a base-URL override pointing at itself.
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BASE_URL"}
+    subprocess.Popen([exe, "proxy", "--port", str(port)], env=env, **kw)
+
+
+HOOKS = {"statusline": statusline, "prompt": prompt, "stopfailure": stopfailure,
+         "session": session}
 
 
 def run(name: str) -> int:

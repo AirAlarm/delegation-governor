@@ -84,6 +84,14 @@ DEFAULTS: dict[str, Any] = {
             "probeTimeoutSeconds": 20,
         },
     ],
+    # The router proxy: the only way to fail over inside Claude Desktop, which
+    # spawns its own claude.exe and so cannot be relaunched by `dg launch`.
+    "proxy": {
+        "port": 8787,
+        # Start it on demand from the SessionStart hook, so a session never
+        # finds a dead ANTHROPIC_BASE_URL.
+        "autoStart": True,
+    },
     "overrides": {"supervisor": "auto", "worker": "auto"},
 }
 

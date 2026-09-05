@@ -31,6 +31,9 @@ MARK = "_delegationGovernor"
 HOOKS_SPEC = {
     "UserPromptSubmit": {"matcher": None, "command": "dg hook prompt", "timeout": 10},
     "StopFailure": {"matcher": "rate_limit", "command": "dg hook stopfailure", "timeout": 10},
+    # Keeps the router proxy alive, so ANTHROPIC_BASE_URL never points at a
+    # dead port. Required for Desktop failover; harmless everywhere else.
+    "SessionStart": {"matcher": None, "command": "dg hook session", "timeout": 15},
 }
 STATUSLINE = {"type": "command", "command": "dg hook statusline", "padding": 0}
 
@@ -57,9 +60,45 @@ def _is_ours(entry: dict) -> bool:
     return any(h.get("command", "").startswith("dg hook") for h in entry.get("hooks", []))
 
 
-def plan(settings: dict[str, Any]) -> list[str]:
+def proxy_env_state(port: int) -> tuple[str | None, bool]:
+    """(current user-level ANTHROPIC_BASE_URL, whether it points at our proxy)."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["reg", "query", r"HKCU\Environment", "/v", "ANTHROPIC_BASE_URL"],
+            capture_output=True, text=True)
+    except OSError:
+        return None, False
+    if out.returncode != 0:
+        return None, False
+    parts = out.stdout.split("REG_SZ")
+    cur = parts[-1].strip() if len(parts) > 1 else None
+    return cur, bool(cur and f":{port}" in cur)
+
+
+def set_proxy_env(port: int) -> str:
+    """Persist ANTHROPIC_BASE_URL for the user so Claude Desktop inherits it.
+
+    Desktop spawns its own claude.exe and cannot be wrapped, so the only way
+    it can reach the router is a persistent user-level variable. Applies to
+    apps started afterwards -- Desktop needs a restart.
+    """
+    import subprocess
+    url = f"http://127.0.0.1:{port}"
+    subprocess.run(["setx", "ANTHROPIC_BASE_URL", url], capture_output=True, text=True)
+    return url
+
+
+def clear_proxy_env() -> None:
+    import subprocess
+    subprocess.run(["reg", "delete", r"HKCU\Environment", "/v", "ANTHROPIC_BASE_URL", "/f"],
+                   capture_output=True, text=True)
+
+
+def plan(settings: dict[str, Any], proxy: bool = False) -> list[str]:
     """Human-readable diff of what install would change."""
     out: list[str] = []
+    port = config.load()["proxy"]["port"]
     for event, spec in HOOKS_SPEC.items():
         existing = settings.get("hooks", {}).get(event, [])
         if any(_is_ours(e) for e in existing):
@@ -79,15 +118,27 @@ def plan(settings: dict[str, Any]) -> list[str]:
         out.append(f"statusLine: ADD `{STATUSLINE['command']}`")
     out.append(f"skill: COPY {SKILL_SRC} -> {SKILL_DST}")
     out.append(f"state: ENSURE {config.HOME} (config.json, governor.db, logs/)")
+    cur, ours = proxy_env_state(port)
+    if proxy:
+        out.append(f"env: SET user ANTHROPIC_BASE_URL=http://127.0.0.1:{port}"
+                   + (" (already set)" if ours else
+                      f" (replacing {cur!r})" if cur else "")
+                   + " -- persistent, applies to apps started afterwards; "
+                     "restart Claude Desktop to pick it up")
+    elif ours:
+        out.append(f"env: ANTHROPIC_BASE_URL already points at the proxy ({cur})")
+    else:
+        out.append(f"env: NOT set (pass --proxy to route Claude through the router "
+                   f"on 127.0.0.1:{port}; required for Claude Desktop failover)")
     out.append(f"backup: {SETTINGS} -> {BACKUPS}/settings.json.dg-<timestamp>")
     out.append("untouched: cc-delegate, plugins, permissions, model, "
                "existing hooks, OpenRouter (absent), Oracle profiles, `claude` itself")
     return out
 
 
-def run(dry_run: bool = False) -> int:
+def run(dry_run: bool = False, proxy: bool = False) -> int:
     settings = _load_settings()
-    for line in plan(settings):
+    for line in plan(settings, proxy):
         print(("[dry-run] " if dry_run else "") + line)
     if dry_run:
         return 0
@@ -128,6 +179,13 @@ def run(dry_run: bool = False) -> int:
 
     config.ensure_home()
     print(f"state dir ready -> {config.HOME}")
+    if proxy:
+        port = config.load()["proxy"]["port"]
+        url = set_proxy_env(port)
+        print(f"env: user ANTHROPIC_BASE_URL={url}")
+        print("     restart Claude Desktop (and any open terminals) to pick it up.")
+        print("     the SessionStart hook keeps the router running; `dg proxy --status` "
+              "checks it.")
     print("done. `dg doctor` to verify, `dg launch` for a managed session, "
           "plain `claude` still bypasses the Governor.")
     return 0
@@ -136,6 +194,10 @@ def run(dry_run: bool = False) -> int:
 def uninstall(dry_run: bool = False, purge: bool = False) -> int:
     settings = _load_settings()
     actions: list[str] = []
+    port = config.load()["proxy"]["port"]
+    _, ours = proxy_env_state(port)
+    if ours:
+        actions.append("env: REMOVE user ANTHROPIC_BASE_URL (it points at the dg proxy)")
     hooks = settings.get("hooks", {})
     for event in HOOKS_SPEC:
         keep = [e for e in hooks.get(event, []) if not _is_ours(e)]
@@ -174,6 +236,9 @@ def uninstall(dry_run: bool = False, purge: bool = False) -> int:
     _atomic_write(SETTINGS, json.dumps(settings, indent=2) + "\n")
     if SKILL_DST.exists():
         shutil.rmtree(SKILL_DST)
+    if ours:
+        clear_proxy_env()
+        print("env: removed user ANTHROPIC_BASE_URL; restart Desktop/terminals")
     if purge and config.HOME.exists():
         shutil.rmtree(config.HOME)
     print("uninstalled. cc-delegate and every other plugin are untouched.")

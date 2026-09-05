@@ -95,9 +95,11 @@ class LauncherTest(DGTest):
     def quota(self, five=None, seven=None, resets_in=3600):
         rl = {}
         if five is not None:
-            rl["five_hour"] = {"utilization": five, "resets_at": int(time.time()) + resets_in}
+            rl["five_hour"] = {"utilization": five / 100.0,
+                               "resets_at": int(time.time()) + resets_in}
         if seven is not None:
-            rl["seven_day"] = {"utilization": seven, "resets_at": int(time.time()) + 86400}
+            rl["seven_day"] = {"utilization": seven / 100.0,
+                               "resets_at": int(time.time()) + 86400}
         supervisor.ingest_statusline(self.con, {"rate_limits": rl})
 
 

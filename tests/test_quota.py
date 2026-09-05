@@ -217,11 +217,14 @@ class TestWorkerRouting(DGTest):
 
 class TestSupervisor(DGTest):
     def sl(self, five=None, seven=None):
+        """Percentages in, fractions on the wire -- `utilization` is 0..1."""
         rl = {}
         if five is not None:
-            rl["five_hour"] = {"utilization": five, "resets_at": int(time.time()) + 3600}
+            rl["five_hour"] = {"utilization": five / 100.0,
+                               "resets_at": int(time.time()) + 3600}
         if seven is not None:
-            rl["seven_day"] = {"utilization": seven, "resets_at": int(time.time()) + 86400}
+            rl["seven_day"] = {"utilization": seven / 100.0,
+                               "resets_at": int(time.time()) + 86400}
         return supervisor.ingest_statusline(self.con, {"rate_limits": rl})
 
     def test_no_rate_limits_is_normal(self):
@@ -259,10 +262,26 @@ class TestSupervisor(DGTest):
         self.assertEqual(supervisor.evaluate(self.con, self.cfg)["state"], supervisor.LOCAL)
 
     def test_used_percentage_spelling_is_accepted(self):
-        """Defensive: an older/newer Claude Code spelling must still parse."""
+        """Defensive: the older spelling is a percentage and stays unscaled."""
         supervisor.ingest_statusline(self.con, {"rate_limits": {
             "five_hour": {"used_percentage": 93, "resets_at": int(time.time()) + 60}}})
         self.assertEqual(supervisor.evaluate(self.con, self.cfg)["state"], supervisor.LOCAL)
+
+    def test_utilization_is_a_fraction_not_a_percentage(self):
+        """Regression: comparing the raw 0..1 fraction against percentage
+        thresholds silently disabled the entire supervisor."""
+        supervisor.ingest_statusline(self.con, {"rate_limits": {
+            "five_hour": {"utilization": 0.95, "resets_at": int(time.time()) + 60}}})
+        out = supervisor.evaluate(self.con, self.cfg)
+        self.assertAlmostEqual(out["fiveHour"]["usedPercent"], 95.0)
+        self.assertEqual(out["state"], supervisor.LOCAL)
+
+    def test_a_nearly_empty_window_is_not_mistaken_for_exhaustion(self):
+        supervisor.ingest_statusline(self.con, {"rate_limits": {
+            "five_hour": {"utilization": 0.07, "resets_at": int(time.time()) + 60}}})
+        out = supervisor.evaluate(self.con, self.cfg)
+        self.assertAlmostEqual(out["fiveHour"]["usedPercent"], 7.0)
+        self.assertEqual(out["state"], supervisor.NORMAL)
 
     def test_empty_payload_does_not_erase_known_quota(self):
         self.sl(75, 20)

@@ -161,6 +161,50 @@ ADR 1 removed - and it is metered billing, which inverts the project's goal of
 spending less. As a *worker* it needs no Governor change at all: cc-delegate
 already speaks that format, so it belongs there as a profile if it is wanted.
 
+## ADR 2d: a router proxy, because Desktop cannot be relaunched
+
+ADR 2 rejected a reverse proxy on the grounds that a process relaunch was
+simpler. That holds for terminal sessions. It does not hold for Claude Desktop,
+and measurement decided it:
+
+* Desktop bundles its own `claude.exe` and spawns sessions as children, so
+  nothing external can wrap or relaunch it;
+* Desktop never invokes the statusLine hook (cleared `claudeQuota` stayed unset
+  across many turns), the `UserPromptSubmit` payload carries no `rate_limits`,
+  and transcripts hold no quota telemetry either.
+
+So in Desktop the supervisor was both blind and unable to act. `dg proxy` fixes
+both at once.
+
+```
+Claude Code --> 127.0.0.1:8787 --> api.anthropic.com   (normal)
+                              \-> LM Studio / Oracle    (quota exhausted)
+```
+
+It is a **router, not a translator**: every backend already speaks the
+Anthropic Messages API, so requests are forwarded, not converted. The switch is
+per request, so there is no restart and no session to preserve.
+
+Two findings made this viable:
+
+* **OAuth survives a custom base URL.** Verified live: with only
+  `ANTHROPIC_BASE_URL` set, Claude Code still sends
+  `Authorization: Bearer sk-ant-oat01...`. Claude Code's own predicate for using
+  OAuth turns on Bedrock/Foundry/AWS/Mantle, an explicit auth token, or an API
+  key -- never on the base URL. Anthropic-bound traffic therefore passes the
+  header through **verbatim and unread**; a fallback tier gets its own key
+  instead, so the subscription token never leaves the machine except to
+  Anthropic.
+* **Anthropic returns quota on every response**
+  (`anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}`). Harvesting it in
+  the proxy restores SAVE mode in Desktop at zero cost.
+
+Wiring it on is opt-in (`dg install --proxy`) because it sets a *persistent
+user* `ANTHROPIC_BASE_URL` -- the only channel Desktop inherits. The trade is
+explicit: Claude Code then depends on the proxy being up, so a `SessionStart`
+hook starts it on demand, `dg doctor` fails loudly if the variable points at a
+dead port, and `dg uninstall` removes the variable again.
+
 ## ADR 3: SQLite for state
 
 `~/.claude/delegation-governor/governor.db`, WAL, schema-versioned.
@@ -225,8 +269,17 @@ channel itself fails.
 **Claude** - never polled. Claude Code hands the statusline
 `rate_limits.{five_hour,seven_day}.{utilization,resets_at}` on every redraw
 (built from the `anthropic-ratelimit-unified-*` headers), so the hook records
-it for free. Note the installed field is `utilization`, not the
-`used_percentage` the brief guessed; both spellings are accepted defensively.
+it for free. Note the installed field is `utilization`, not the `used_percentage` the brief
+guessed; both spellings are accepted defensively.
+
+**`utilization` is a fraction 0..1, not a percentage** -- Claude Code renders it
+as `Math.floor(utilization * 100)`. Comparing the raw value against percentage
+thresholds silently disabled the entire supervisor: nothing could ever reach
+70. The conversion lives in `supervisor._window`, the single point the field
+enters the system. This one is worth remembering because the original test
+fixtures passed percentages, encoding the same misunderstanding as the code, so
+they validated the bug instead of catching it -- it took a real response header
+to expose.
 Absence is normal before the first API response and never reads as 0%.
 
 ## ADR 7: cc-delegate is read, never driven
