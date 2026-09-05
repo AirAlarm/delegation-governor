@@ -52,8 +52,16 @@ class FakeClaude:
 class LauncherTest(DGTest):
     def setUp(self):
         super().setUp()
-        self.cfg["lmstudio"]["baseUrl"] = "http://127.0.0.1:1234"
-        self.cfg["lmstudio"]["model"] = "qwen/qwen3.6-35b-a3b"
+        self.cfg["supervisorFallbacks"] = [
+            {"name": "lmstudio", "kind": "lmstudio", "baseUrl": "http://127.0.0.1:1234",
+             "model": "local/main", "smallModel": "local/small",
+             "tokenEnvVar": "LMSTUDIO_API_KEY", "contextLength": 131072,
+             "minContextLength": 40960, "loadTimeoutSeconds": 600, "ttlSeconds": 3600,
+             "autoLoad": True},
+            {"name": "oracle", "kind": "remote", "baseUrl": "https://oracle.example",
+             "model": "oracle/main", "smallModel": "oracle/small",
+             "tokenEnvVar": "ORACLE_LLM_API_KEY"},
+        ]
         # LM Studio is assumed healthy unless a test says otherwise. Model
         # residency is stubbed too: the real path shells out to `lms load`,
         # which would hang the suite on an actual multi-GB model load.
@@ -61,7 +69,8 @@ class LauncherTest(DGTest):
         launcher.probe_lmstudio_messages = lambda cfg: (True, "fake ok")
         # Keep the real implementations reachable for the classes that test them.
         self.real = {n: getattr(launcher, n) for n in
-                     ("ensure_local_model", "model_context", "local_contention")}
+                     ("ensure_local_model", "model_context", "local_contention",
+                      "probe_tier", "first_usable_tier")}
         launcher.ensure_local_model = lambda cfg: (True, "fake loaded")
         launcher.model_context = lambda cfg: ("loaded", 131072, 131072)
         launcher.local_contention = lambda cfg: ""
@@ -152,8 +161,8 @@ class TestEnvironment(LauncherTest):
         env, model = launcher.env_for(launcher.LOCAL, self.cfg, base={})
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:1234")
         self.assertTrue(env["ANTHROPIC_AUTH_TOKEN"])
-        self.assertEqual(model, "qwen/qwen3.6-35b-a3b")
-        self.assertEqual(env["ANTHROPIC_SMALL_FAST_MODEL"], self.cfg["lmstudio"]["smallModel"])
+        self.assertEqual(model, "local/main")
+        self.assertEqual(env["ANTHROPIC_SMALL_FAST_MODEL"], "local/small")
 
     def test_no_credentials_are_invented(self):
         env, _ = launcher.env_for(launcher.LOCAL, self.cfg, base={})
@@ -200,7 +209,7 @@ class TestLifecycle(LauncherTest):
         # Second launch: LM Studio, same session resumed, local model explicit.
         self.assertEqual(f.base_url(1), "http://127.0.0.1:1234")
         self.assertEqual(f.arg(1, "--resume"), sid, "session id must be preserved")
-        self.assertEqual(f.arg(1, "--model"), "qwen/qwen3.6-35b-a3b")
+        self.assertEqual(f.arg(1, "--model"), "local/main")
 
     def test_ledger_and_running_jobs_survive_the_restart(self):
         self.quota(10, 10)
@@ -268,7 +277,7 @@ class TestLifecycle(LauncherTest):
 
     def test_dead_local_endpoint_gives_a_recovery_path_not_a_loop(self):
         self.quota(99, 10)
-        launcher.probe_lmstudio = lambda cfg: (False, "connection refused")
+        launcher.probe_tier = lambda t: (False, f"{t['name']}: connection refused")
         f = self.fake([(0, 100.0, None)])
         rc = launcher.run(self.cfg, [], max_restarts=5)
         self.assertEqual(rc, 2)
@@ -276,7 +285,7 @@ class TestLifecycle(LauncherTest):
 
     def test_force_starts_on_anthropic_when_local_is_dead(self):
         self.quota(99, 10)
-        launcher.probe_lmstudio = lambda cfg: (False, "connection refused")
+        launcher.probe_tier = lambda t: (False, f"{t['name']}: connection refused")
         f = self.fake([(0, 500.0, None)])
         rc = launcher.run(self.cfg, [], force=True, max_restarts=5)
         self.assertEqual(rc, 0)
@@ -400,16 +409,16 @@ class TestLocalModelResidency(LauncherTest):
 
     def setUp(self):
         super().setUp()
-        self.unstub("ensure_local_model")
+        self.unstub("ensure_local_model", "first_usable_tier")
 
     def ctx(self, state, loaded, maximum=131072):
-        launcher.model_context = lambda cfg: (state, loaded, maximum)
+        launcher.model_context = lambda t: (state, loaded, maximum)
 
     def test_already_loaded_big_enough_does_not_reload(self):
         self.ctx("loaded", 131072)
         launcher.shutil = type("S", (), {"which": staticmethod(
             lambda x: self.fail("must not reload an adequate model"))})()
-        ok, detail = launcher.ensure_local_model(self.cfg)
+        ok, detail = launcher.ensure_local_model(self.cfg["supervisorFallbacks"][0])
         self.assertTrue(ok)
         self.assertIn("131072", detail)
 
@@ -423,23 +432,23 @@ class TestLocalModelResidency(LauncherTest):
             "TimeoutExpired": Exception})()
         # after the reload the API reports the bigger context
         seq = iter([("loaded", 26112, 131072), ("loaded", 131072, 131072)])
-        launcher.model_context = lambda cfg: next(seq)
-        ok, _ = launcher.ensure_local_model(self.cfg)
+        launcher.model_context = lambda t: next(seq)
+        ok, _ = launcher.ensure_local_model(self.cfg["supervisorFallbacks"][0])
         self.assertTrue(ok)
         self.assertIn("-c", calls[0])
         self.assertEqual(calls[0][calls[0].index("-c") + 1], "131072")
 
     def test_context_is_capped_at_the_model_maximum(self):
-        self.cfg["lmstudio"]["contextLength"] = 999999
+        self.cfg["supervisorFallbacks"][0]["contextLength"] = 999999
         seq = iter([("not-loaded", None, 131072), ("loaded", 131072, 131072)])
-        launcher.model_context = lambda cfg: next(seq)
+        launcher.model_context = lambda t: next(seq)
         calls = []
         launcher.shutil = type("S", (), {"which": staticmethod(lambda x: "/fake/lms")})()
         launcher.subprocess = type("P", (), {
             "run": staticmethod(lambda cmd, **kw: calls.append(cmd) or
                                 type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
             "TimeoutExpired": Exception})()
-        launcher.ensure_local_model(self.cfg)
+        launcher.ensure_local_model(self.cfg["supervisorFallbacks"][0])
         self.assertEqual(calls[0][calls[0].index("-c") + 1], "131072")
 
     def test_load_failure_is_reported_not_swallowed(self):
@@ -450,20 +459,20 @@ class TestLocalModelResidency(LauncherTest):
                 "returncode": 0, "stdout": "",
                 "stderr": "Error: insufficient system resources"})()),
             "TimeoutExpired": Exception})()
-        ok, detail = launcher.ensure_local_model(self.cfg)
+        ok, detail = launcher.ensure_local_model(self.cfg["supervisorFallbacks"][0])
         self.assertFalse(ok)
         self.assertIn("insufficient system resources", detail)
 
     def test_autoload_off_refuses_rather_than_loading(self):
-        self.cfg["lmstudio"]["autoLoad"] = False
+        self.cfg["supervisorFallbacks"][0]["autoLoad"] = False
         self.ctx("not-loaded", None)
-        ok, detail = launcher.ensure_local_model(self.cfg)
+        ok, detail = launcher.ensure_local_model(self.cfg["supervisorFallbacks"][0])
         self.assertFalse(ok)
         self.assertIn("autoLoad is off", detail)
 
     def test_launch_refuses_local_when_the_model_cannot_be_loaded(self):
         self.quota(99, 10)
-        launcher.ensure_local_model = lambda cfg: (False, "out of memory")
+        launcher.probe_tier = lambda t: (False, f"{t['name']}: out of memory")
         f = self.fake([(0, 100.0, None)])
         rc = launcher.run(self.cfg, [], max_restarts=2)
         self.assertEqual(rc, 2)
@@ -477,7 +486,7 @@ class TestSharedModelSlot(LauncherTest):
 
     def setUp(self):
         super().setUp()
-        self.unstub("local_contention")
+        self.unstub("local_contention", "first_usable_tier")
 
     def _cc_config(self, profiles):
         d = self.home / "cc"
@@ -491,8 +500,11 @@ class TestSharedModelSlot(LauncherTest):
             "station-main": {"api_base": "http://127.0.0.1:1234/v1"},
             "oracle-smart": {"api_base": "https://claude-llm.example.org"}})
         warn = launcher.local_contention(self.cfg)
-        self.assertIn("station-main", warn)
-        self.assertNotIn("oracle-smart", warn)
+        conflict, _, suggestion = warn.partition("share one LM Studio")
+        # station-* contend for the slot; oracle-* is the way out, not a conflict
+        self.assertIn("station-main", conflict)
+        self.assertNotIn("oracle-smart", conflict)
+        self.assertIn("oracle-smart", suggestion)
 
     def test_remote_only_profiles_are_not_a_conflict(self):
         self._cc_config({"oracle-fast": {"api_base": "https://claude-llm.example.org"}})

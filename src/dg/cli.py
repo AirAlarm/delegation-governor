@@ -429,18 +429,13 @@ def cmd_doctor(args) -> int:
     chk("git", bool(shutil.which("git")), "")
 
     from . import launcher
-    ok, detail = _probe_lmstudio(cfg)
-    chk("lm studio (supervisor fallback)", ok, detail)
-    if ok:
+    # Every supervisor fallback tier, in the order dg launch would try them.
+    for t in launcher.tiers(cfg):
+        tok, detail = launcher.probe_tier(t)
+        chk(f"supervisor tier {t['name']}", tok, detail)
+    if launcher.tier(cfg, "lmstudio"):
         amok, amdetail = _probe_lmstudio_messages(cfg)
         chk("lm studio /v1/messages (anthropic api)", amok, amdetail)
-        state, loaded, maximum = launcher.model_context(cfg)
-        need = cfg["lmstudio"]["minContextLength"]
-        chk("lm studio supervisor context",
-            state != "loaded" or bool(loaded and loaded >= need),
-            f"{cfg['lmstudio']['model']} {state}, ctx {loaded}/{maximum}, "
-            f"need >= {need} for Claude Code's ~34k system prompt"
-            + ("" if state == "loaded" else " (dg launch loads it on demand)"))
         contention = launcher.local_contention(cfg)
         if contention:
             warn("lm studio single model slot", contention)

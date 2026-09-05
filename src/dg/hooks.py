@@ -96,6 +96,12 @@ def statusline() -> int:
 # ---------------------------------------------------------------- prompt
 
 def prompt() -> int:
+    import os as _os
+    if _os.environ.get("DG_HOOK_TRACE"):
+        import json as _j, pathlib as _pl, sys as _sys
+        raw = _sys.stdin.read()
+        _pl.Path(_os.environ["DG_HOOK_TRACE"]).write_text(raw[:4000], encoding="utf-8")
+        _sys.stdin = __import__("io").StringIO(raw)
     """UserPromptSubmit: one compact line of Governor STATE.
 
     State only -- policy lives in the skill, so this costs a handful of tokens

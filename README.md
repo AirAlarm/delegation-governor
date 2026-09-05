@@ -46,7 +46,8 @@ Two facts shaped the design, both verified live:
 2. **Claude Code fixes its backend at process start** from `process.env`, so
    failover is a process lifecycle, not a runtime switch. `dg launch`
    supervises that lifecycle and switches only at Claude Code's own exit,
-   which is the one boundary where no tool call can be interrupted.
+   which is the one boundary where no tool call can be interrupted. Fallbacks
+   are tried in order: LM Studio, then the always-on Oracle VM.
 
 ## Requirements
 
@@ -150,17 +151,26 @@ dg integrate $A --cleanup
     "hardTimeoutSeconds": 0,                   // 0 = no hard kill
     "minCheckSpacingSeconds": 60
   },
-  "lmstudio": {
-    "baseUrl": "http://127.0.0.1:1234",
-    "model": "openai/gpt-oss-20b",             // 12GB: fits alongside 128k ctx
-    "smallModel": "openai/gpt-oss-20b",
-    "tokenEnvVar": "LMSTUDIO_API_KEY",         // name only, never the value
-    "contextLength": 131072,                   // loaded via `lms load -c`
-    "minContextLength": 40960,                 // Claude Code's prompt is ~34k
-    "loadTimeoutSeconds": 600,
-    "ttlSeconds": 3600,
-    "autoLoad": true                           // false = you manage residency
-  }
+  // ordered: tried in turn when Anthropic is out
+  "supervisorFallbacks": [
+    { "name": "lmstudio", "kind": "lmstudio",       // GPU box: fast, one model slot
+      "baseUrl": "http://127.0.0.1:1234",
+      "model": "openai/gpt-oss-20b",                // 12GB: fits alongside 128k ctx
+      "smallModel": "openai/gpt-oss-20b",
+      "tokenEnvVar": "LMSTUDIO_API_KEY",            // name only, never the value
+      "contextLength": 131072,                      // loaded via `lms load -c`
+      "minContextLength": 40960,                    // Claude Code's prompt is ~34k
+      "loadTimeoutSeconds": 600, "ttlSeconds": 3600,
+      "autoLoad": true },                           // false = you manage residency
+    { "name": "oracle", "kind": "remote",           // always-on VM: slow CPU ARM
+      "baseUrl": "https://claude-llm.vibecodelabs.org",
+      "model": "oracle-smart · gemma-4 26b",
+      "smallModel": "oracle-fast · gemma-4 e2b",
+      "tokenEnvVar": "ORACLE_LLM_API_KEY",
+      "tokenFile": "~/.cc-delegate/credentials.json",
+      "tokenFileKey": "ORACLE_LLM_API_KEY",
+      "probeTimeoutSeconds": 20 }
+  ]
 }
 ```
 

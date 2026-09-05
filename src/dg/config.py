@@ -43,28 +43,47 @@ DEFAULTS: dict[str, Any] = {
         "hardTimeoutSeconds": 0,
         "minCheckSpacingSeconds": 60,
     },
-    "lmstudio": {
-        "baseUrl": "http://127.0.0.1:1234",
-        # gpt-oss-20b, not the larger qwen: at 12GB it leaves room to load
-        # 128k of context, where the 35B's weights alone (22GB) trip LM
-        # Studio's memory guardrails on this box. Change both freely.
-        "model": "openai/gpt-oss-20b",
-        "smallModel": "openai/gpt-oss-20b",
-        # Env var holding the LM Studio token, when the server requires one.
-        # The value is never stored here.
-        "tokenEnvVar": "LMSTUDIO_API_KEY",
-        # Claude Code's system prompt plus tool definitions measured ~34k
-        # tokens against this build, so a model loaded at LM Studio's default
-        # context refuses the very first turn with exceed_context_size_error.
-        # Load it big, or the LOCAL route is useless.
-        "contextLength": 131072,
-        "minContextLength": 40960,
-        "loadTimeoutSeconds": 600,
-        "ttlSeconds": 3600,
-        # `lms load` is how a model gets a usable context. Set false if you
-        # manage LM Studio residency yourself.
-        "autoLoad": True,
-    },
+    # Ordered local supervisor tiers, tried in turn when Anthropic is out.
+    # Tier 1 is the GPU box (fast, but one model slot and only up when the PC
+    # is); tier 2 is the always-on Oracle VM (slow CPU ARM, but independent of
+    # both the GPU slot and the PC being awake).
+    "supervisorFallbacks": [
+        {
+            "name": "lmstudio",
+            "kind": "lmstudio",
+            "baseUrl": "http://127.0.0.1:1234",
+            # gpt-oss-20b, not the larger qwen: at 12GB it leaves room to load
+            # 128k of context, where the 35B's weights alone (22GB) trip LM
+            # Studio's memory guardrails on this box.
+            "model": "openai/gpt-oss-20b",
+            "smallModel": "openai/gpt-oss-20b",
+            # Env var holding the token, when the server requires one. The
+            # value is never stored here.
+            "tokenEnvVar": "LMSTUDIO_API_KEY",
+            # Claude Code's system prompt plus tool definitions measured ~34k
+            # tokens, so a model at LM Studio's default context refuses the
+            # very first turn with exceed_context_size_error.
+            "contextLength": 131072,
+            "minContextLength": 40960,
+            "loadTimeoutSeconds": 600,
+            "ttlSeconds": 3600,
+            "autoLoad": True,
+        },
+        {
+            "name": "oracle",
+            "kind": "remote",
+            "baseUrl": "https://claude-llm.vibecodelabs.org",
+            "model": "oracle-smart · gemma-4 26b",
+            "smallModel": "oracle-fast · gemma-4 e2b",
+            "tokenEnvVar": "ORACLE_LLM_API_KEY",
+            # Fall back to the key cc-delegate already stores for this gateway
+            # rather than asking for a second copy. Read on use, never cached.
+            "tokenFile": "~/.cc-delegate/credentials.json",
+            "tokenFileKey": "ORACLE_LLM_API_KEY",
+            # A CPU-only ARM box: minutes per turn is normal, not a failure.
+            "probeTimeoutSeconds": 20,
+        },
+    ],
     "overrides": {"supervisor": "auto", "worker": "auto"},
 }
 

@@ -135,6 +135,32 @@ detect the shared endpoint and warn; the Governor does not try to serialise
 another tool's worker. While the supervisor is LOCAL, delegate to Codex or an
 `oracle-*` profile.
 
+## ADR 2c: two fallback tiers, tried in order
+
+`supervisorFallbacks` is an ordered list; `dg launch` takes the first that
+answers a zero-inference probe.
+
+| Tier | Strength | Weakness |
+|---|---|---|
+| `lmstudio` (GPU box) | fast, free | one model slot, only up when the PC is |
+| `oracle` (Ampere VM) | always on, independent of the GPU slot | CPU-only ARM, minutes per turn |
+
+Oracle earns its place for two reasons beyond redundancy: it is up when the
+station PC is not, and running the supervisor there leaves LM Studio's single
+model slot free for `station-*` workers - the contention that really did fail a
+delegated task during testing.
+
+Verified live: the gateway answers `/v1/messages` in Anthropic format with model
+`oracle-smart · gemma-4 26b` (it exposes no `/v1/models`, so model ids come from
+the cc-delegate config). Its key is read from `ORACLE_LLM_API_KEY`, falling back
+to the key cc-delegate already stores, rather than asking for a second copy.
+
+**OpenRouter was considered and rejected.** It serves only the OpenAI chat
+format, so using it as a supervisor would reintroduce the translation layer
+ADR 1 removed - and it is metered billing, which inverts the project's goal of
+spending less. As a *worker* it needs no Governor change at all: cc-delegate
+already speaks that format, so it belongs there as a profile if it is wanted.
+
 ## ADR 3: SQLite for state
 
 `~/.claude/delegation-governor/governor.db`, WAL, schema-versioned.
