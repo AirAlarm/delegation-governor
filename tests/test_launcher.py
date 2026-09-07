@@ -653,3 +653,35 @@ class TestSessionHookSafety(LauncherTest):
         hooks._disarm(8787, path)
         env = json.loads(path.read_text(encoding="utf-8"))["env"]
         self.assertEqual(env, {"SOMETHING_ELSE": "keep me"})
+
+
+class TestInstallPreservesProxyWiring(LauncherTest):
+    """Regression: `dg install` used to treat "no --proxy flag" as "tear the
+    router down", so running it for an unrelated reason silently unwired
+    failover and the next session stopped failing over without saying why."""
+
+    def _settings(self, env=None):
+        import json
+        p = self.home / "settings.json"
+        p.write_text(json.dumps({"env": env} if env else {}), encoding="utf-8")
+        return p
+
+    def test_none_keeps_an_armed_router_armed(self):
+        from dg import install
+        s = {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"}}
+        # proxy=None must resolve to True when the wiring is already present
+        self.assertTrue(install.settings_env_state(s, 8787)[1])
+
+    def test_none_keeps_an_unarmed_router_unarmed(self):
+        from dg import install
+        self.assertFalse(install.settings_env_state({}, 8787)[1])
+
+    def test_explicit_flags_still_win(self):
+        """--proxy arms, --no-proxy tears down; only the absence is 'leave it'."""
+        from dg import cli
+        p = cli.build_parser()
+        self.assertTrue(p.parse_args(["install", "--proxy"]).proxy)
+        self.assertTrue(p.parse_args(["install", "--no-proxy"]).no_proxy)
+        a = p.parse_args(["install"])
+        self.assertFalse(a.proxy)
+        self.assertFalse(a.no_proxy)

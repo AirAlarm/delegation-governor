@@ -185,8 +185,19 @@ def plan(settings: dict[str, Any], proxy: bool = False) -> list[str]:
     return out
 
 
-def run(dry_run: bool = False, proxy: bool = False) -> int:
+def run(dry_run: bool = False, proxy: bool | None = None) -> int:
+    """proxy: True arms the router, False tears it down, None keeps it as-is.
+
+    `None` is the default deliberately. An earlier version treated "no flag" as
+    "tear it down", so running `dg install` for an unrelated reason -- say, to
+    re-apply the cc-delegate patch -- silently unwired the router and the next
+    session quietly stopped failing over. Installing something must not change
+    a setting the user never mentioned.
+    """
     settings = _load_settings()
+    if proxy is None:
+        port = config.load()["proxy"]["port"]
+        proxy = proxy_env_state(port)[1] or settings_env_state(settings, port)[1]
     for line in plan(settings, proxy):
         print(("[dry-run] " if dry_run else "") + line)
     if dry_run:
@@ -239,6 +250,7 @@ def run(dry_run: bool = False, proxy: bool = False) -> int:
 
     if not proxy:
         # Never leave Claude Code pointed at a router that may not be running.
+        # Only reached when the caller asked for it, or nothing was armed.
         _, ours_now = proxy_env_state(config.load()["proxy"]["port"])
         had_settings = settings_env_state(settings, config.load()["proxy"]["port"])[1]
         if ours_now:

@@ -665,6 +665,14 @@ def cmd_proxy(args) -> int:
         return 1
     if (h := proxy.health(port)) and not args.force:
         return _emit({**h, "note": f"a dg proxy is already listening on {port}"}, True)
+    if args.start:
+        # Detached: `dg proxy` alone blocks in the foreground, which is not
+        # what someone wants when they just need the router up.
+        from . import hooks
+        hooks._spawn_proxy(port)
+        if hooks._wait_for_proxy(proxy, port):
+            return _emit({**(proxy.health(port) or {}), "started": True}, True)
+        return _emit({"ok": False, "error": f"proxy did not come up on {port}"}, True)
     return proxy.serve(cfg, port)
 
 
@@ -703,7 +711,8 @@ def cmd_test(args) -> int:
 
 def cmd_install(args) -> int:
     from . import install
-    return install.run(dry_run=args.dry_run, proxy=args.proxy)
+    proxy = True if args.proxy else (False if args.no_proxy else None)
+    return install.run(dry_run=args.dry_run, proxy=proxy)
 
 
 def cmd_uninstall(args) -> int:
@@ -843,6 +852,8 @@ def build_parser() -> argparse.ArgumentParser:
             help="router proxy: per-request failover, works inside Claude Desktop")
     s.add_argument("--port", type=int)
     s.add_argument("--status", action="store_true")
+    s.add_argument("--start", action="store_true",
+                   help="start it in the background and wait until it answers")
     s.add_argument("--stop", action="store_true")
     s.add_argument("--force", action="store_true", help="start even if one seems to be running")
 
@@ -855,9 +866,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("install", cmd_install, help="install hooks, skill and statusline")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--proxy", action="store_true",
-                   help="also route Claude through the local router by setting a "
-                        "persistent user ANTHROPIC_BASE_URL (needed for Claude Desktop "
-                        "failover)")
+                   help="arm the local router: point Claude Code at it via settings.json "
+                        "and a persistent user ANTHROPIC_BASE_URL")
+    s.add_argument("--no-proxy", action="store_true",
+                   help="tear the router wiring down. Without either flag the current "
+                        "wiring is left exactly as it is")
     s = add("uninstall", cmd_uninstall, help="remove them again")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--purge", action="store_true", help="also delete governor state")
