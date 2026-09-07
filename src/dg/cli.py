@@ -491,6 +491,19 @@ def cmd_doctor(args) -> int:
 
     plugin = _cc_delegate_root()
     chk("cc-delegate plugin", plugin is not None, str(plugin or "not found (fallback worker)"))
+    if plugin is not None:
+        from . import ccdelegate
+        st = ccdelegate.check()
+        g = ccdelegate.gate_settings()
+        detail = st["detail"]
+        if st["ok"] and g:
+            detail += f" (ctx {g.get('CONTEXT_LENGTH')}, ttl {g.get('MODEL_TTL_S')}s)"
+        if st["ok"]:
+            chk("cc-delegate station patch", True, detail)
+        else:
+            # A plugin update reverts this silently and delegation then fails
+            # without saying why, so it is a warning, not a footnote.
+            warn("cc-delegate station patch", detail)
 
     sup = supervisor.evaluate(con, cfg)
     chk("claude quota data", sup["fiveHour"] is not None or sup["sevenDay"] is not None,
