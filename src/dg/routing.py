@@ -38,6 +38,12 @@ def select(con: sqlite3.Connection, cfg: dict, refresh: bool = True) -> dict[str
         return {"worker": CC_DELEGATE, "reason": "override worker=cc-delegate",
                 "codexState": "OVERRIDDEN"}
 
+    # `refresh=False` keeps the hooks cheap, but it must not freeze a stale
+    # EXHAUSTED past its own reset time: the state would never recover during a
+    # long session that only touches cc-delegate, and Codex would sit unused
+    # after its quota came back. Probe exactly when there is a reason to.
+    if not refresh and quota_codex.recovery_due(con):
+        refresh = True
     info = quota_codex.refresh(con, cfg) if refresh else {
         "state": store.kv_get(con, quota_codex.K_STATE, quota_codex.UNKNOWN), "cached": True}
     state = info["state"]

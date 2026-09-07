@@ -257,6 +257,18 @@ def refresh(con: sqlite3.Connection, cfg: dict, force: bool = False) -> dict[str
             "unavailableUntil": ev["unavailableUntil"]}
 
 
+def recovery_due(con: sqlite3.Connection) -> bool:
+    """Is Codex EXHAUSTED with its reset time already behind us?
+
+    True means a probe is worth spending now -- the cheap cached read would
+    otherwise report exhaustion forever.
+    """
+    if store.kv_get(con, K_STATE) != EXHAUSTED:
+        return False
+    until = store.kv_get(con, K_UNTIL, 0) or 0
+    return bool(until) and until <= time.time()
+
+
 def mark_exhausted(con: sqlite3.Connection, resets_at: int | None, detail: str = "") -> None:
     """Called by the Codex adapter when a run dies of quota mid-task (spec 32)."""
     with store.transaction(con):

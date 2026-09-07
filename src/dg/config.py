@@ -90,10 +90,14 @@ DEFAULTS: dict[str, Any] = {
             # Claude Code's system prompt plus tool definitions measured ~34k
             # tokens, so a model at LM Studio's default context refuses the
             # very first turn with exceed_context_size_error.
-            "contextLength": 131072,
+            # 65536 deliberately matches cc-delegate's gate CONTEXT_LENGTH.
+            # They share one LM Studio slot, and the gate reloads any model
+            # resident at a different context -- so a mismatch here makes the
+            # supervisor and a station worker evict each other on every hop.
+            "contextLength": 65536,
             "minContextLength": 40960,
             "loadTimeoutSeconds": 600,
-            "ttlSeconds": 3600,
+            "ttlSeconds": 14400,
             "autoLoad": True,
         },
         {

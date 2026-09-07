@@ -327,3 +327,35 @@ class TestSupervisor(DGTest):
         self.sl(1, 1)
         self.cfg["overrides"]["supervisor"] = "local"
         self.assertEqual(supervisor.evaluate(self.con, self.cfg)["state"], supervisor.LOCAL)
+
+
+class TestRecoveryIsNoticed(DGTest):
+    """Regression: hooks read state with refresh=False to stay cheap, which
+    froze EXHAUSTED past its own reset -- Codex was never used again."""
+
+    def test_recovery_due_only_after_the_reset(self):
+        store.kv_set(self.con, quota_codex.K_STATE, quota_codex.EXHAUSTED)
+        store.kv_set(self.con, quota_codex.K_UNTIL, time.time() + 600)
+        self.assertFalse(quota_codex.recovery_due(self.con))
+        store.kv_set(self.con, quota_codex.K_UNTIL, time.time() - 1)
+        self.assertTrue(quota_codex.recovery_due(self.con))
+
+    def test_not_due_when_healthy(self):
+        store.kv_set(self.con, quota_codex.K_STATE, quota_codex.READY)
+        store.kv_set(self.con, quota_codex.K_UNTIL, time.time() - 600)
+        self.assertFalse(quota_codex.recovery_due(self.con))
+
+    def test_cheap_read_still_probes_once_the_reset_passed(self):
+        store.kv_set(self.con, quota_codex.K_STATE, quota_codex.EXHAUSTED)
+        store.kv_set(self.con, quota_codex.K_UNTIL, time.time() - 1)
+        quota_codex.read_rate_limits = lambda *a, **k: {
+            "ok": True, "data": payload(win(0), win(5))}
+        out = routing.select(self.con, self.cfg, refresh=False)
+        self.assertEqual(out["worker"], "codex")
+
+    def test_cheap_read_stays_cheap_before_the_reset(self):
+        store.kv_set(self.con, quota_codex.K_STATE, quota_codex.EXHAUSTED)
+        store.kv_set(self.con, quota_codex.K_UNTIL, time.time() + 600)
+        quota_codex.read_rate_limits = lambda *a, **k: self.fail("probed too early")
+        self.assertEqual(routing.select(self.con, self.cfg, refresh=False)["worker"],
+                         "cc-delegate")
