@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from . import config, quota_codex, routing, scheduler, store, supervisor, sync
@@ -96,12 +97,6 @@ def statusline() -> int:
 # ---------------------------------------------------------------- prompt
 
 def prompt() -> int:
-    import os as _os
-    if _os.environ.get("DG_HOOK_TRACE"):
-        import json as _j, pathlib as _pl, sys as _sys
-        raw = _sys.stdin.read()
-        _pl.Path(_os.environ["DG_HOOK_TRACE"]).write_text(raw[:4000], encoding="utf-8")
-        _sys.stdin = __import__("io").StringIO(raw)
     """UserPromptSubmit: one compact line of Governor STATE.
 
     State only -- policy lives in the skill, so this costs a handful of tokens
@@ -163,11 +158,16 @@ def stopfailure() -> int:
 
 
 def session() -> int:
-    """SessionStart: make sure the router proxy is up.
+    """SessionStart: guarantee the router is up before the first request.
 
-    ANTHROPIC_BASE_URL is set persistently once, so a session must never find a
-    dead port there. Starting it here means every Claude Code session -- Desktop
-    included -- self-heals before its first request.
+    While the redirect is armed, a session that cannot reach the proxy cannot
+    reach *any* backend, so this must not merely fire-and-forget:
+
+      * it waits until the port actually accepts connections, closing the race
+        between spawning the proxy and the session's first API call;
+      * if the proxy cannot be started at all, it removes the redirect so the
+        next session talks to Anthropic directly instead of inheriting a broken
+        setup. That matters most when nobody is at the machine to fix it.
     """
     _stdin_json()
     try:
@@ -176,12 +176,55 @@ def session() -> int:
             return 0
         from . import proxy
         port = cfg["proxy"]["port"]
-        if proxy.health(port, timeout=1.0):
+        if proxy.health(port, timeout=1.5):
             return 0
         _spawn_proxy(port)
+        if _wait_for_proxy(proxy, port):
+            return 0
+        _disarm(port)
     except Exception:
         return 0
     return 0
+
+
+def _wait_for_proxy(proxy, port: int, deadline: float = 12.0) -> bool:
+    import time as _t
+    end = _t.monotonic() + deadline
+    while _t.monotonic() < end:
+        if proxy.health(port, timeout=1.0):
+            return True
+        _t.sleep(0.4)
+    return False
+
+
+def settings_path() -> Path:
+    return Path.home() / ".claude" / "settings.json"
+
+
+def _disarm(port: int, path: Path | None = None) -> None:
+    """Unpoint Claude Code from a router that will not start.
+
+    Only settings.json is touched: it is the file this process can safely
+    rewrite, and it is what a fresh session reads.
+    """
+    p = path or settings_path()
+    try:
+        s = json.loads(p.read_text("utf-8"))
+        env = s.get("env") or {}
+        if f":{port}" not in str(env.get("ANTHROPIC_BASE_URL", "")):
+            return
+        env.pop("ANTHROPIC_BASE_URL", None)
+        if not env:
+            s.pop("env", None)
+        tmp = p.with_suffix(".dgtmp")
+        tmp.write_text(json.dumps(s, indent=2) + chr(10), "utf-8")
+        tmp.replace(p)
+    except OSError:
+        return
+    print("Governor: the router proxy would not start, so the ANTHROPIC_BASE_URL "
+          "redirect was removed -- new sessions go straight to Anthropic. "
+          "Run `dg doctor`, then `dg install --proxy` to re-arm it.",
+          file=sys.stderr)
 
 
 def _spawn_proxy(port: int) -> None:
@@ -195,8 +238,10 @@ def _spawn_proxy(port: int) -> None:
     kw: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL}
     if os.name == "nt":
+        # CREATE_NO_WINDOW, not DETACHED_PROCESS: the latter gives a console
+        # app its own console, which pops an empty terminal window on screen.
         kw["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                               | getattr(subprocess, "DETACHED_PROCESS", 0))
+                               | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
     else:
         kw["start_new_session"] = True
     # The proxy must not inherit a base-URL override pointing at itself.

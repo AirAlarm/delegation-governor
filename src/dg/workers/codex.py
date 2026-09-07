@@ -92,9 +92,11 @@ def _spawn_runner(job_file: Path) -> int:
         "env": {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
     }
     if os.name == "nt":
+        # CREATE_NO_WINDOW, not DETACHED_PROCESS: the latter gives a console
+        # app its own console, which pops an empty terminal window on screen.
         kwargs["creationflags"] = (
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         )
     else:
         kwargs["start_new_session"] = True

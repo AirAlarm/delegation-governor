@@ -587,3 +587,69 @@ class TestProbeHasNoSideEffects(LauncherTest):
         self.assertFalse(ok)
         self.assertIn("only 8192 ctx", detail)
         self.assertEqual(self.loads, [])
+
+
+class TestSessionHookSafety(LauncherTest):
+    """While the redirect is armed, a session that cannot reach the proxy
+    cannot reach any backend. The hook must therefore not fire-and-forget."""
+
+    def _settings(self, env):
+        import json
+        from pathlib import Path
+        home = self.home / "fakehome"
+        (home / ".claude").mkdir(parents=True, exist_ok=True)
+        (home / ".claude" / "settings.json").write_text(
+            json.dumps({"env": env} if env else {}), encoding="utf-8")
+        return home / ".claude" / "settings.json"
+
+    def test_waits_until_the_port_accepts(self):
+        from dg import hooks
+        seen = []
+
+        class FakeProxy:
+            calls = 0
+
+            @staticmethod
+            def health(port, timeout=1.0):
+                FakeProxy.calls += 1
+                # not up on the first few polls, then up
+                return {"ok": True} if FakeProxy.calls > 3 else None
+
+        hooks._spawn_proxy = lambda port: seen.append(port)
+        self.assertTrue(hooks._wait_for_proxy(FakeProxy, 8787, deadline=5))
+        self.assertGreater(FakeProxy.calls, 1, "returned before the port was ready")
+
+    def test_gives_up_and_reports(self):
+        from dg import hooks
+
+        class Dead:
+            @staticmethod
+            def health(port, timeout=1.0):
+                return None
+
+        self.assertFalse(hooks._wait_for_proxy(Dead, 8787, deadline=1))
+
+    def test_disarms_the_redirect_when_the_proxy_will_not_start(self):
+        """Unattended machines must not inherit a broken setup."""
+        import json
+        from dg import hooks
+        path = self._settings({"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"})
+        hooks._disarm(8787, path)
+        self.assertNotIn("env", json.loads(path.read_text(encoding="utf-8")))
+
+    def test_disarm_leaves_someone_elses_base_url_alone(self):
+        import json
+        from dg import hooks
+        path = self._settings({"ANTHROPIC_BASE_URL": "https://gateway.example"})
+        hooks._disarm(8787, path)
+        env = json.loads(path.read_text(encoding="utf-8"))["env"]
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://gateway.example")
+
+    def test_disarm_keeps_other_env_entries(self):
+        import json
+        from dg import hooks
+        path = self._settings({"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
+                               "SOMETHING_ELSE": "keep me"})
+        hooks._disarm(8787, path)
+        env = json.loads(path.read_text(encoding="utf-8"))["env"]
+        self.assertEqual(env, {"SOMETHING_ELSE": "keep me"})

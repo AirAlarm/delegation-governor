@@ -78,11 +78,12 @@ DEFAULTS: dict[str, Any] = {
             "name": "lmstudio",
             "kind": "lmstudio",
             "baseUrl": "http://127.0.0.1:1234",
-            # gpt-oss-20b, not the larger qwen: at 12GB it leaves room to load
-            # 128k of context, where the 35B's weights alone (22GB) trip LM
-            # Studio's memory guardrails on this box.
-            "model": "openai/gpt-oss-20b",
-            "smallModel": "openai/gpt-oss-20b",
+            # qwen3.5-9b: 6.5GB, so it loads with a large context and matches
+            # the model cc-delegate's station-main uses, which means the
+            # supervisor and a station worker want the *same* resident model
+            # rather than evicting each other.
+            "model": "qwen/qwen3.5-9b",
+            "smallModel": "qwen/qwen3.5-9b",
             # Env var holding the token, when the server requires one. The
             # value is never stored here.
             "tokenEnvVar": "LMSTUDIO_API_KEY",

@@ -31,9 +31,10 @@ MARK = "_delegationGovernor"
 HOOKS_SPEC = {
     "UserPromptSubmit": {"matcher": None, "command": "dg hook prompt", "timeout": 10},
     "StopFailure": {"matcher": "rate_limit", "command": "dg hook stopfailure", "timeout": 10},
-    # Keeps the router proxy alive, so ANTHROPIC_BASE_URL never points at a
-    # dead port. Required for Desktop failover; harmless everywhere else.
-    "SessionStart": {"matcher": None, "command": "dg hook session", "timeout": 15},
+    # Only meaningful when the proxy is wired in, so it is added and removed
+    # with it -- a hook that starts a proxy nothing routes through is noise.
+    "SessionStart": {"matcher": None, "command": "dg hook session", "timeout": 15,
+                     "proxyOnly": True},
 }
 STATUSLINE = {"type": "command", "command": "dg hook statusline", "padding": 0}
 
@@ -76,12 +77,42 @@ def proxy_env_state(port: int) -> tuple[str | None, bool]:
     return cur, bool(cur and f":{port}" in cur)
 
 
-def set_proxy_env(port: int) -> str:
-    """Persist ANTHROPIC_BASE_URL for the user so Claude Desktop inherits it.
+def settings_env_state(settings: dict, port: int) -> tuple[str | None, bool]:
+    cur = (settings.get("env") or {}).get("ANTHROPIC_BASE_URL")
+    return cur, bool(cur and f":{port}" in cur)
 
-    Desktop spawns its own claude.exe and cannot be wrapped, so the only way
-    it can reach the router is a persistent user-level variable. Applies to
-    apps started afterwards -- Desktop needs a restart.
+
+def set_settings_env(settings: dict, port: int) -> str:
+    """Route via `settings.json` -> `env`, the documented mechanism.
+
+    Claude Code applies this with `Object.assign(process.env, ...)`, and it is
+    file-based, so unlike a shell export it reaches GUI-launched apps that
+    inherit nothing from a login shell. Verified: with no ANTHROPIC_BASE_URL in
+    the environment, a request goes to the proxy.
+
+    An explicit environment variable still wins over this, which is why the
+    user-level variable is set too -- belt and braces for terminals.
+    """
+    url = f"http://127.0.0.1:{port}"
+    settings.setdefault("env", {})["ANTHROPIC_BASE_URL"] = url
+    return url
+
+
+def clear_settings_env(settings: dict) -> None:
+    env = settings.get("env") or {}
+    env.pop("ANTHROPIC_BASE_URL", None)
+    if not env:
+        settings.pop("env", None)
+
+
+def set_proxy_env(port: int) -> str:
+    """Persist ANTHROPIC_BASE_URL so new terminal sessions reach the router.
+
+    This was intended to cover Claude Desktop too, but measurement says it
+    cannot: Desktop sets ANTHROPIC_BASE_URL=https://api.anthropic.com for its
+    own sessions, which wins over the user-level variable, and a settings.json
+    `env` block does not override it either (tested -- the proxy saw no
+    traffic). Terminal sessions started after this do route through the proxy.
     """
     import subprocess
     url = f"http://127.0.0.1:{port}"
@@ -101,6 +132,10 @@ def plan(settings: dict[str, Any], proxy: bool = False) -> list[str]:
     port = config.load()["proxy"]["port"]
     for event, spec in HOOKS_SPEC.items():
         existing = settings.get("hooks", {}).get(event, [])
+        if spec.get("proxyOnly") and not proxy:
+            if any(_is_ours(e) for e in existing):
+                out.append(f"hook {event}: REMOVE (only used with --proxy)")
+            continue
         if any(_is_ours(e) for e in existing):
             out.append(f"hook {event}: already installed, no change")
         else:
@@ -120,16 +155,20 @@ def plan(settings: dict[str, Any], proxy: bool = False) -> list[str]:
     out.append(f"state: ENSURE {config.HOME} (config.json, governor.db, logs/)")
     cur, ours = proxy_env_state(port)
     if proxy:
+        out.append(f"env: SET settings.json env.ANTHROPIC_BASE_URL=http://127.0.0.1:{port} "
+                   f"(the file-based route; reaches GUI-launched apps)")
         out.append(f"env: SET user ANTHROPIC_BASE_URL=http://127.0.0.1:{port}"
                    + (" (already set)" if ours else
                       f" (replacing {cur!r})" if cur else "")
                    + " -- persistent, applies to apps started afterwards; "
                      "restart Claude Desktop to pick it up")
-    elif ours:
-        out.append(f"env: ANTHROPIC_BASE_URL already points at the proxy ({cur})")
+    elif ours or settings_env_state(settings, port)[1]:
+        out.append("env: REMOVE the ANTHROPIC_BASE_URL redirect from settings.json "
+                   "and the user environment (Claude Code goes straight to Anthropic)")
     else:
-        out.append(f"env: NOT set (pass --proxy to route Claude through the router "
-                   f"on 127.0.0.1:{port}; required for Claude Desktop failover)")
+        out.append(f"env: NOT set (pass --proxy to route terminal Claude sessions "
+                   f"through the router on 127.0.0.1:{port}). Claude Desktop sets "
+                   f"ANTHROPIC_BASE_URL itself and ignores this.")
     out.append(f"backup: {SETTINGS} -> {BACKUPS}/settings.json.dg-<timestamp>")
     out.append("untouched: cc-delegate, plugins, permissions, model, "
                "existing hooks, OpenRouter (absent), Oracle profiles, `claude` itself")
@@ -150,6 +189,11 @@ def run(dry_run: bool = False, proxy: bool = False) -> int:
     hooks = settings.setdefault("hooks", {})
     for event, spec in HOOKS_SPEC.items():
         entries = hooks.setdefault(event, [])
+        if spec.get("proxyOnly") and not proxy:
+            # Tear it down when the proxy is not wired: leaving it would start
+            # a router that nothing points at.
+            hooks[event] = [e for e in entries if not _is_ours(e)]
+            continue
         if any(_is_ours(e) for e in entries):
             continue
         entry: dict[str, Any] = {"hooks": [{"type": "command", "command": spec["command"],
@@ -164,6 +208,12 @@ def run(dry_run: bool = False, proxy: bool = False) -> int:
     settings["statusLine"] = dict(STATUSLINE)
     settings.setdefault(MARK, {})["installedAt"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
+    for event in list(hooks):
+        if not hooks[event]:
+            hooks.pop(event)  # an empty array is noise, not configuration
+    if not hooks:
+        settings.pop("hooks", None)
+
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(SETTINGS, json.dumps(settings, indent=2) + "\n")
     print(f"merged settings -> {SETTINGS}")
@@ -177,11 +227,26 @@ def run(dry_run: bool = False, proxy: bool = False) -> int:
     else:
         print(f"warning: skill source missing at {SKILL_SRC}")
 
+    if not proxy:
+        # Never leave Claude Code pointed at a router that may not be running.
+        _, ours_now = proxy_env_state(config.load()["proxy"]["port"])
+        had_settings = settings_env_state(settings, config.load()["proxy"]["port"])[1]
+        if ours_now:
+            clear_proxy_env()
+            print("env: removed user ANTHROPIC_BASE_URL")
+        if had_settings:
+            clear_settings_env(settings)
+            _atomic_write(SETTINGS, json.dumps(settings, indent=2) + chr(10))
+            print("env: removed settings.json env.ANTHROPIC_BASE_URL")
+
     config.ensure_home()
     print(f"state dir ready -> {config.HOME}")
     if proxy:
         port = config.load()["proxy"]["port"]
-        url = set_proxy_env(port)
+        url = set_settings_env(settings, port)
+        _atomic_write(SETTINGS, json.dumps(settings, indent=2) + chr(10))
+        print(f"env: settings.json env.ANTHROPIC_BASE_URL={url}")
+        set_proxy_env(port)
         print(f"env: user ANTHROPIC_BASE_URL={url}")
         print("     restart Claude Desktop (and any open terminals) to pick it up.")
         print("     the SessionStart hook keeps the router running; `dg proxy --status` "
@@ -239,6 +304,7 @@ def uninstall(dry_run: bool = False, purge: bool = False) -> int:
     if ours:
         clear_proxy_env()
         print("env: removed user ANTHROPIC_BASE_URL; restart Desktop/terminals")
+    clear_settings_env(settings)
     if purge and config.HOME.exists():
         shutil.rmtree(config.HOME)
     print("uninstalled. cc-delegate and every other plugin are untouched.")

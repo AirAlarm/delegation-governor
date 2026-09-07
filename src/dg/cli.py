@@ -474,11 +474,14 @@ def cmd_doctor(args) -> int:
             f"serving {h.get('stats')}" if h else
             "ANTHROPIC_BASE_URL points here but nothing is listening -- "
             "run `dg proxy` (SessionStart normally does)")
-        chk("claude routed through router", True, f"{env_cur} (Desktop failover active)")
+        chk("claude routed through router", True,
+            f"{env_cur} -- applies to terminal sessions started after the variable "
+            f"was set. Claude Desktop sets ANTHROPIC_BASE_URL itself and ignores "
+            f"this, so Desktop does NOT route through the proxy.")
     else:
         chk("router proxy", True,
             (f"running on :{port}, not wired in" if h else f"not running (:{port})")
-            + "; `dg install --proxy` routes Claude through it for Desktop failover")
+            + "; `dg install --proxy` routes terminal sessions through it")
 
     lp = store.kv_get(con, "launcher") or {}
     if lp:
