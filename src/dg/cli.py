@@ -613,6 +613,15 @@ def cmd_fill(args) -> int:
     return _emit(out, True)
 
 
+def cmd_ccdelegate(args) -> int:
+    from . import ccdelegate
+    if args.apply:
+        return _emit(ccdelegate.apply(), True)
+    out = dict(ccdelegate.check())
+    out["gate"] = ccdelegate.gate_settings()
+    return _emit(out, True)
+
+
 def cmd_lanes(args) -> int:
     from . import lanes as lanes_mod
     con = store.connect()
@@ -801,6 +810,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start on Anthropic even when the supervisor says LOCAL "
                         "and LM Studio is unusable")
     s.add_argument("claude_args", nargs=argparse.REMAINDER)
+
+    s = add("ccdelegate", cmd_ccdelegate,
+            help="cc-delegate station patch: check drift, or re-apply it")
+    s.add_argument("--apply", action="store_true",
+                   help="re-apply the patch (idempotent; needed after a plugin update)")
 
     s = add("lanes", cmd_lanes, help="worker lanes: capacity, availability, classes")
     s.add_argument("--repo", default="")

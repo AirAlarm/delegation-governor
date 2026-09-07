@@ -71,7 +71,33 @@ dg doctor
 `dg install` backs up `~/.claude/settings.json` to `~/.claude/backups/` with a
 timestamp, then **merges**: existing hooks, permissions, plugins and model
 settings are preserved. An existing statusline is stashed and restored on
-uninstall. `cc-delegate` is never modified.
+uninstall.
+
+It also re-applies the **cc-delegate station patch**, which the Governor owns
+(see below). Your cc-delegate profiles and credentials are never touched.
+
+### The cc-delegate station patch
+
+cc-delegate is a Claude Code plugin, so `claude plugin update` replaces its
+whole install directory and silently drops the local edits that make the
+station lane work: the LM Studio model gate (context length, TTL, load
+timeouts), `api_base` threading so a worker can reach LM Studio at all, and an
+`mcp<2` pin without which the MCP server fails to start.
+
+Those edits are vendored here and re-applied on install, so an update degrades
+loudly rather than mysteriously:
+
+```bash
+dg ccdelegate            # is the install still patched, and with our gate?
+dg ccdelegate --apply    # re-apply (idempotent; backs up what it replaces)
+```
+
+`dg doctor` warns on drift. Gate tuning: 65536 context, 4h model TTL, 600s load
+budget with a settle delay before the first poll — a cold load returns before
+the weights are mapped, so polling immediately wastes the budget.
+
+**After applying, restart the Claude Code session** — the cc-delegate MCP server
+imports the gate once at startup and caches it.
 
 It adds exactly three integration points:
 
@@ -124,6 +150,7 @@ dg integrate $A --cleanup
 | `dg fallback <id>` | clean retry after a failure |
 | `dg worker-status` / `dg logs [<id>]` | live attempts / worker logs |
 | `dg probe codex\|claude` | confirm a provider really recovered |
+| `dg ccdelegate [--apply]` | cc-delegate station patch: drift check / re-apply |
 | `dg override supervisor\|worker <v>` / `dg clear-override` | manual control |
 | `dg launch` / `dg test` / `dg install` / `dg uninstall` | |
 

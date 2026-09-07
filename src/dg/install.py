@@ -5,8 +5,12 @@ Everything is additive and reversible:
     existing hooks, permissions and plugins are preserved untouched;
   * an existing statusLine is stashed under `_dgPreviousStatusLine` and put
     back on uninstall;
-  * cc-delegate is only ever read, never modified;
   * stock `claude` is never shadowed.
+
+cc-delegate is the exception, deliberately: the Governor owns its station patch
+(see `dg.ccdelegate`). A plugin update replaces the install directory and drops
+the tuning that makes the station lane work at all, so `dg install` re-applies
+it and backs up what it replaces.
 """
 from __future__ import annotations
 
@@ -152,6 +156,11 @@ def plan(settings: dict[str, Any], proxy: bool = False) -> list[str]:
     else:
         out.append(f"statusLine: ADD `{STATUSLINE['command']}`")
     out.append(f"skill: COPY {SKILL_SRC} -> {SKILL_DST}")
+    from . import ccdelegate
+    st = ccdelegate.check()
+    out.append("cc-delegate: " + ("re-APPLY the station patch (gate, api_base, mcp<2 pin)"
+                                  if st["state"] in ("unpatched", "drifted")
+                                  else st["detail"]))
     out.append(f"state: ENSURE {config.HOME} (config.json, governor.db, logs/)")
     cur, ours = proxy_env_state(port)
     if proxy:
@@ -170,8 +179,9 @@ def plan(settings: dict[str, Any], proxy: bool = False) -> list[str]:
                    f"through the router on 127.0.0.1:{port}). Claude Desktop sets "
                    f"ANTHROPIC_BASE_URL itself and ignores this.")
     out.append(f"backup: {SETTINGS} -> {BACKUPS}/settings.json.dg-<timestamp>")
-    out.append("untouched: cc-delegate, plugins, permissions, model, "
-               "existing hooks, OpenRouter (absent), Oracle profiles, `claude` itself")
+    out.append("untouched: your cc-delegate profiles and credentials, other plugins, "
+               "permissions, model, existing hooks, OpenRouter (absent), "
+               "Oracle profiles, `claude` itself")
     return out
 
 
@@ -238,6 +248,16 @@ def run(dry_run: bool = False, proxy: bool = False) -> int:
             clear_settings_env(settings)
             _atomic_write(SETTINGS, json.dumps(settings, indent=2) + chr(10))
             print("env: removed settings.json env.ANTHROPIC_BASE_URL")
+
+    from . import ccdelegate
+    st = ccdelegate.check()
+    if st["state"] in ("unpatched", "drifted"):
+        res = ccdelegate.apply()
+        print(f"cc-delegate: {res['state']} ({res.get('detail','')[:120]})")
+        if res.get("backup"):
+            print(f"cc-delegate: previous gate backed up -> {res['backup']}")
+    elif st["state"] != "absent":
+        print(f"cc-delegate: {st['detail']}")
 
     config.ensure_home()
     print(f"state dir ready -> {config.HOME}")
