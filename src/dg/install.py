@@ -57,6 +57,10 @@ def _managed_command(*args: str) -> str:
 
 
 HOOKS_SPEC = {
+    # The prompt entrypoint dispatches by hook_event_name, so the installed
+    # command can serve both events without changing the CLI surface.
+    "PreToolUse": {"matcher": "Read|Bash", "command": _managed_command("hook", "prompt"),
+                   "timeout": 10},
     "UserPromptSubmit": {"matcher": None, "command": _managed_command("hook", "prompt"), "timeout": 10},
     "StopFailure": {"matcher": "rate_limit", "command": _managed_command("hook", "stopfailure"), "timeout": 10},
     # Only meaningful when the proxy is wired in, so it is added and removed
