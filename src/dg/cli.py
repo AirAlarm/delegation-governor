@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config, gitutil, quota_codex, routing, scheduler, store, supervisor, sync, workorder
+from . import quickread
 from .workers import cc_delegate
 from .workers import codex_plugin
 
@@ -995,6 +996,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("lanes", cmd_lanes, help="worker lanes: capacity, availability, classes")
     s.add_argument("--repo", default="")
     s.add_argument("--json", action="store_true")
+
+    s = add("quickread", quickread.run,
+            help="prepare files for one-shot read-only delegation")
+    s.add_argument("paths", nargs="+", metavar="PATH")
 
     s = add("fill", cmd_fill,
             help="start one READY task in every free lane, non-blocking")
