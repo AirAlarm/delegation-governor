@@ -12,13 +12,25 @@ from dg import store
 class TestLedger(DGTest):
     def test_creation_and_stable_ids(self):
         a, b = self.task("first"), self.task("second")
-        self.assertEqual((a, b), ("DG-1", "DG-2"))
+        self.assertEqual((a, b), ("repo-1", "repo-2"))
         self.assertEqual(store.get_task(self.con, a)["title"], "first")
 
     def test_ids_never_reused_after_delete(self):
         a = self.task("gone")
         self.con.execute("DELETE FROM tasks WHERE id=?", (a,))
-        self.assertEqual(self.task("new"), "DG-2")
+        self.assertEqual(self.task("new"), "repo-2")
+
+    def test_ids_are_scoped_per_repo(self):
+        """A fresh project gets its own counter starting at 1, not a global
+        one -- the whole point (no more 'DG-45' for a brand-new project)."""
+        a = self.task("in repo one", repo="/repo")
+        b = self.task("in repo two", repo="/other-project")
+        c = self.task("second in repo one", repo="/repo")
+        self.assertEqual((a, b, c), ("repo-1", "other-project-1", "repo-2"))
+
+    def test_repo_slug_is_filesystem_and_id_safe(self):
+        self.assertEqual(store.repo_slug("/Users/x/My Cool Project!"), "my-cool-project")
+        self.assertEqual(store.repo_slug(""), "dg")
 
     def test_dependency_must_exist(self):
         with self.assertRaises(ValueError):

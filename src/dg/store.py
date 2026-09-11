@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterable
 
 from . import config
@@ -195,11 +197,30 @@ class transaction:
 
 # ---------------------------------------------------------------- tasks
 
-def next_id(con: sqlite3.Connection) -> str:
-    """Stable, monotonic DG-N ids. Never reuses an id, even after deletion."""
-    n = int(kv_get(con, "lastTaskNumber", 0)) + 1
-    kv_set(con, "lastTaskNumber", n)
-    return f"DG-{n}"
+def repo_slug(repo: str) -> str:
+    """Short, id-safe project name from a repo path, e.g. .../delegation-governor -> 'delegation-governor'.
+
+    A single global DG-N counter meant a fresh project's first task looked
+    like DG-45. Slugging by repo gives each project its own counter (starting
+    at 1) while ids stay globally unique -- no primary-key or dependency-
+    reference change needed, just what next_id() computes.
+    """
+    name = Path(repo).name.lower() if repo else ""
+    slug = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
+    return slug or "dg"
+
+
+def next_id(con: sqlite3.Connection, repo: str = "") -> str:
+    """Stable, monotonic <repo-slug>-N ids. Never reuses an id, even after deletion.
+
+    Counted per repo (via repo_slug), not globally -- existing DG-N ids from
+    before this change are untouched and stay valid as historical references.
+    """
+    slug = repo_slug(repo)
+    key = f"lastTaskNumber:{slug}"
+    n = int(kv_get(con, key, 0)) + 1
+    kv_set(con, key, n)
+    return f"{slug}-{n}"
 
 
 def create_task(
@@ -220,17 +241,18 @@ def create_task(
     if mode not in ("READ_ONLY", "WRITE"):
         raise ValueError("mode must be READ_ONLY or WRITE")
     deps = list(depends_on)
+    abs_repo = os.path.abspath(repo) if repo else ""
     now = time.time()
     with transaction(con):
         for d in deps:
             if con.execute("SELECT 1 FROM tasks WHERE id=?", (d,)).fetchone() is None:
                 raise ValueError(f"unknown dependency {d}")
-        tid = next_id(con)
+        tid = next_id(con, abs_repo)
         con.execute(
             "INSERT INTO tasks(id,title,mode,status,goal,repo,base_commit,paths,depends_on,"
             "owner,priority,task_class,created_at,updated_at,retry_of)"
             " VALUES(?,?,?,'PLANNED',?,?,?,?,?,?,?,?,?,?,?)",
-            (tid, title, mode, goal, os.path.abspath(repo) if repo else "", base_commit,
+            (tid, title, mode, goal, abs_repo, base_commit,
              json.dumps(list(paths)), json.dumps(deps), owner, priority, task_class,
              now, now, retry_of),
         )
@@ -259,7 +281,9 @@ def get_task(con: sqlite3.Connection, tid: str) -> dict[str, Any] | None:
 
 
 def all_tasks(con: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = con.execute("SELECT * FROM tasks ORDER BY CAST(SUBSTR(id,4) AS INTEGER)").fetchall()
+    # Insertion order, not the id string: ids are no longer a fixed-width
+    # "DG-" prefix + number, since next_id() now scopes by repo (repo_slug).
+    rows = con.execute("SELECT * FROM tasks ORDER BY rowid").fetchall()
     return [_task_row(r) for r in rows]
 
 
@@ -291,7 +315,7 @@ def create_fallback(con: sqlite3.Connection, original: dict[str, Any]) -> str:
         if current is None or current["status"] not in (
                 "QUOTA_FAILED", "AUTH_FAILED", "FAILED"):
             raise ValueError(f"{original['id']} is not eligible for fallback")
-        new = next_id(con)
+        new = next_id(con, original["repo"])
         con.execute(
             "INSERT INTO tasks(id,title,mode,status,goal,repo,base_commit,paths,depends_on,"
             "owner,priority,task_class,created_at,updated_at,retry_of) "
