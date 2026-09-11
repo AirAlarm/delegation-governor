@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 7,
+    "schemaVersion": 8,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -60,11 +60,22 @@ DEFAULTS: dict[str, Any] = {
             # Codex, the local GPU, or Oracle.
             "openrouter": {"worker": "cc-delegate", "profile": "openrouter-coder",
                            "maxWriteJobs": 1, "endpoint": "openrouter"},
-            # OpenCode Go: a second metered cloud lane, reached through its own
-            # cc-delegate profile and endpoint so it never contends with
-            # OpenRouter's slot or budget.
-            "opencode": {"worker": "cc-delegate", "profile": "opencode-go",
-                         "maxWriteJobs": 1, "endpoint": "opencode"},
+            # OpenCode Go, split into three tiers matching the model-per-task-
+            # weight idea from AirAlarm/opencode-delegation-plugin (a separate,
+            # OpenCode-native multi-agent system, not something dg can call
+            # into directly -- different product, no bridge -- so this adopts
+            # its verified tier->model mapping rather than its code). Each is
+            # its own lane/profile/slot so they never contend with each other
+            # or with OpenRouter's budget. Models verified live against
+            # opencode.ai/zen/go/v1/messages 2026-09-12; the reference plugin's
+            # own "smart" pick (glm-5.3) 500s on that endpoint, so this uses
+            # deepseek-v4-pro (its own listed Main-tier alternate) instead.
+            "opencode-fast": {"worker": "cc-delegate", "profile": "opencode-fast",
+                              "maxWriteJobs": 1, "endpoint": "opencode"},
+            "opencode-main": {"worker": "cc-delegate", "profile": "opencode-main",
+                              "maxWriteJobs": 1, "endpoint": "opencode"},
+            "opencode-smart": {"worker": "cc-delegate", "profile": "opencode-smart",
+                               "maxWriteJobs": 1, "endpoint": "opencode"},
         },
         # Preferred lanes per task class, best first. A lane that is busy,
         # unavailable or excluded is skipped, so this is a preference, not a
@@ -89,14 +100,15 @@ DEFAULTS: dict[str, Any] = {
             # "lanes"/"endpoints", so either is a one-line re-add if there's
             # ever a reason to trust it again.
             #
-            # hard/standard: codex leads (strongest model), opencode second.
-            # simple/tiny: local-first is preserved on purpose (station) so
-            # trivial work doesn't eat the Codex slot -- see
-            # test_simple_prefers_the_gpu_box_over_codex.
-            "hard": ["codex", "opencode", "station"],
-            "standard": ["codex", "opencode", "station"],
-            "simple": ["station", "opencode", "codex"],
-            "tiny": ["station", "opencode"],
+            # hard/standard: codex leads (strongest model), the matching
+            # OpenCode Go tier second. simple/tiny: local-first is preserved
+            # on purpose (station) so trivial work doesn't eat the Codex slot
+            # -- see test_simple_prefers_the_gpu_box_over_codex -- with the
+            # fast tier (cheap, high-volume) as the cloud fallback.
+            "hard": ["codex", "opencode-smart", "station"],
+            "standard": ["codex", "opencode-main", "station"],
+            "simple": ["station", "opencode-fast", "codex"],
+            "tiny": ["station", "opencode-fast"],
         },
         "defaultClass": "standard",
         "totalWriteJobsPerRepo": 4,
@@ -136,15 +148,16 @@ DEFAULTS: dict[str, Any] = {
                 "name": "opencode",
                 "kind": "opencode",
                 "baseUrl": "https://opencode.ai/zen/go",
-                # qwen3.7-plus: generous $12/5h-$30/wk-$60/mo tier (~21,600
-                # req/mo). qwen3.8-max looked stronger but is the *tightest*
-                # limit on the whole plan (~810 req/mo) -- a bad default for a
-                # lane meant to absorb routine delegated work. kimi-k2.7-code
-                # is explicitly coding-branded and equally generous, but
-                # verified live to 500 on this Anthropic-compatible endpoint
-                # (works on the OpenAI-compatible one instead) -- not used
-                # here since the probe and this profile both need /v1/messages.
-                "model": "qwen3.7-plus",
+                # Shared probe definition for all three opencode-fast/main/
+                # smart lanes -- account reachability and billing state don't
+                # vary per model, only per key. minimax-m3 (the "main" tier's
+                # model) is just the representative probe payload; qwen3.8-max
+                # was tried first and is the *tightest* limit on the whole
+                # plan (~810 req/mo). glm-5.3 (the reference plugin's own
+                # "smart" pick) and kimi-k2.7-code both verified to 500 on
+                # this Anthropic-compatible endpoint -- not used anywhere here
+                # since the probe and every profile need /v1/messages.
+                "model": "minimax-m3",
                 "tokenEnvVar": "OPENCODE_GO_API_KEY",
                 "tokenFile": "~/.cc-delegate/credentials.json",
                 "tokenFileKey": "OPENCODE_GO_API_KEY",
@@ -286,7 +299,7 @@ def _migrate(stored: dict) -> dict:
             current = routing.get(task_class)
             if current is None:
                 continue  # deep merge will supply the new default
-            if "opencode" not in current:
+            if "opencode" in defaults and "opencode" not in current:
                 position = defaults.index("opencode")
                 current.insert(min(position, len(current)), "opencode")
     if have < 6:
@@ -309,6 +322,16 @@ def _migrate(stored: dict) -> dict:
         oracle = stored.get("workers", {}).get("lanes", {}).get("oracle")
         if isinstance(oracle, dict) and oracle.get("maxWriteJobs") == 2:
             oracle["maxWriteJobs"] = 1
+        workers = stored.setdefault("workers", {})
+        workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
+    if have < 8:
+        # The single "opencode" lane is split into three tiers (fast/main/
+        # smart), adopting AirAlarm/opencode-delegation-plugin's verified
+        # tier->model mapping. Not additive: a lane key is being replaced by
+        # three differently-named ones, so classRouting is replaced outright
+        # again rather than patched. The old "opencode" lane/profile entries
+        # (if any) are left in "lanes" untouched -- orphaned, not deleted,
+        # same treatment already given to oracle/openrouter.
         workers = stored.setdefault("workers", {})
         workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]

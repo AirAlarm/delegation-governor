@@ -191,7 +191,7 @@ def _probe_opencode(t: dict) -> tuple[bool, str]:
         return False, f"{t['name']}: set {t.get('tokenEnvVar', 'OPENCODE_GO_API_KEY')}"
     url = t["baseUrl"].rstrip("/") + "/v1/messages"
     payload = json.dumps({
-        "model": t.get("model", "qwen3.7-plus"), "max_tokens": 1,
+        "model": t.get("model", "minimax-m3"), "max_tokens": 1,
         "messages": [{"role": "user", "content": "ping"}],
     }).encode()
     req = urllib.request.Request(

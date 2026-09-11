@@ -55,7 +55,7 @@ class TestOpenRouterConfig(DGTest):
             },
         }), "utf-8")
         migrated = config.load()
-        self.assertEqual(migrated["schemaVersion"], 7)
+        self.assertEqual(migrated["schemaVersion"], 8)
         self.assertEqual(migrated["workers"]["classRouting"],
                          config.DEFAULTS["workers"]["classRouting"])
         self.assertEqual(migrated["workers"]["totalWriteJobsPerRepo"], 4)
@@ -114,10 +114,13 @@ class TestOpenRouterProbe(DGTest):
 
 
 class TestOpenCodeConfig(DGTest):
-    def test_default_is_a_fifth_worker_only_lane(self):
-        lane = self.cfg["workers"]["lanes"]["opencode"]
-        self.assertEqual(lane["profile"], "opencode-go")
-        self.assertEqual(lane["endpoint"], "opencode")
+    def test_default_is_three_worker_only_opencode_tiers(self):
+        for tier, profile in (("opencode-fast", "opencode-fast"),
+                              ("opencode-main", "opencode-main"),
+                              ("opencode-smart", "opencode-smart")):
+            lane = self.cfg["workers"]["lanes"][tier]
+            self.assertEqual(lane["profile"], profile)
+            self.assertEqual(lane["endpoint"], "opencode")
         self.assertNotIn("opencode", [x["name"] for x in self.cfg["supervisorFallbacks"]])
 
 
