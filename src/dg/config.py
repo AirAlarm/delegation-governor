@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 8,
+    "schemaVersion": 9,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -101,14 +101,18 @@ DEFAULTS: dict[str, Any] = {
             # ever a reason to trust it again.
             #
             # hard/standard: codex leads (strongest model), the matching
-            # OpenCode Go tier second. simple/tiny: local-first is preserved
-            # on purpose (station) so trivial work doesn't eat the Codex slot
-            # -- see test_simple_prefers_the_gpu_box_over_codex -- with the
-            # fast tier (cheap, high-volume) as the cloud fallback.
+            # OpenCode Go tier second, station last.
+            #
+            # simple/tiny: local-first is deprecated (user decision,
+            # 2026-09-12) -- Station's local GPU is much slower than the
+            # cloud tiers, so station is now the *fallback* for when
+            # opencode-fast is occupied, not the leader. codex still stays
+            # last/absent for these classes so trivial work doesn't eat the
+            # Codex slot -- see test_simple_prefers_opencode_over_codex.
             "hard": ["codex", "opencode-smart", "station"],
             "standard": ["codex", "opencode-main", "station"],
-            "simple": ["station", "opencode-fast", "codex"],
-            "tiny": ["station", "opencode-fast"],
+            "simple": ["opencode-fast", "station", "codex"],
+            "tiny": ["opencode-fast", "station"],
         },
         "defaultClass": "standard",
         "totalWriteJobsPerRepo": 4,
@@ -332,6 +336,14 @@ def _migrate(stored: dict) -> dict:
         # again rather than patched. The old "opencode" lane/profile entries
         # (if any) are left in "lanes" untouched -- orphaned, not deleted,
         # same treatment already given to oracle/openrouter.
+        workers = stored.setdefault("workers", {})
+        workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
+    if have < 9:
+        # Local-first deprecated for simple/tiny (user decision, 2026-09-12):
+        # Station's local GPU is much slower than the cloud tiers, so it
+        # becomes the fallback for when opencode-fast is occupied, not the
+        # leader. Same "replace outright" reasoning as v6/v7/v8 -- the
+        # relative order actually flipped, not an insertion.
         workers = stored.setdefault("workers", {})
         workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]

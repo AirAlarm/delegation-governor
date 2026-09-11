@@ -40,14 +40,18 @@ class TestClassRouting(LaneTest):
     def test_hard_prefers_codex(self):
         self.assertEqual(self.choose(self.task(task_class="hard"))["lane"], "codex")
 
-    def test_simple_prefers_the_gpu_box_over_codex(self):
-        """The whole point: trivial work must not consume the Codex slot."""
-        self.assertEqual(self.choose(self.task(task_class="simple"))["lane"], "station")
+    def test_simple_prefers_opencode_over_codex(self):
+        """Local-first is deprecated (station is much slower than the cloud
+        tiers) but the underlying point still holds: trivial work must not
+        consume the Codex slot."""
+        self.assertEqual(self.choose(self.task(task_class="simple"))["lane"], "opencode-fast")
 
-    def test_tiny_prefers_the_gpu_box(self):
+    def test_tiny_prefers_opencode_fast(self):
         """Oracle is off entirely (concurrent jobs verified to starve each
-        other into total failure); station is tiny's local-first pick now."""
-        self.assertEqual(self.choose(self.task(task_class="tiny"))["lane"], "station")
+        other into total failure); local-first is also deprecated (station
+        is much slower than the cloud tiers), so opencode-fast leads and
+        station is only the fallback."""
+        self.assertEqual(self.choose(self.task(task_class="tiny"))["lane"], "opencode-fast")
 
     def test_standard_prefers_codex(self):
         self.assertEqual(self.choose(self.task(task_class="standard"))["lane"], "codex")
@@ -160,8 +164,8 @@ class TestFourLaneConcurrency(LaneTest):
 
         self.assertEqual(placed[hard], "codex")
         self.assertEqual(placed[standard], "opencode-main")
-        self.assertEqual(placed[simple], "station")
-        self.assertEqual(placed[tiny], "opencode-fast")
+        self.assertEqual(placed[simple], "opencode-fast")
+        self.assertEqual(placed[tiny], "station")
         self.assertEqual(len(set(placed.values())), 4, "all four must be distinct lanes")
 
         counts = lanes.in_flight(self.con, "/repo")
@@ -219,7 +223,7 @@ class TestSchedulerIntegration(LaneTest):
     def test_select_for_returns_a_lane(self):
         out = routing.select_for(self.con, self.cfg, store.get_task(
             self.con, self.task(task_class="simple")))
-        self.assertEqual(out["lane"], "station")
+        self.assertEqual(out["lane"], "opencode-fast")
         self.assertEqual(out["worker"], "cc-delegate")
 
 
