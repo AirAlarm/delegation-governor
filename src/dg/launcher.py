@@ -116,6 +116,9 @@ def probe_tier(t: dict, load: bool = False) -> tuple[bool, str]:
     if t.get("kind") == "openrouter":
         return _probe_openrouter(t)
 
+    if t.get("kind") == "opencode":
+        return _probe_opencode(t)
+
     import urllib.error
     import urllib.request
     url = t["baseUrl"].rstrip("/") + "/v1/messages"
@@ -164,6 +167,60 @@ def _probe_openrouter(t: dict) -> tuple[bool, str]:
         return False, f"{t['name']}: API key spending limit exhausted"
     suffix = f", ${float(remaining):.2f} key limit remaining" if remaining is not None else ""
     return True, f"{t['name']}: API key ready{suffix}"
+
+
+def _probe_opencode(t: dict) -> tuple[bool, str]:
+    """Validate an OpenCode Go key, without misreading a billing block as a bad key.
+
+    Verified live: a correctly authenticated key on a workspace with no
+    payment method gets HTTP 401 and {"error": {"type": "CreditsError"}} --
+    the same status code a genuinely bad key gets. Distinguish by body shape,
+    not status, or a billing problem gets reported as "check your token".
+
+    Unlike LM Studio/Oracle's invalid-body trick, an empty body here is
+    ambiguous: a missing `model` or `messages` field also comes back as
+    HTTP 401 with a *different* error type (ModelError/MissingSessionID),
+    which would otherwise be misread as a bad key too. A minimal but valid
+    request avoids that, at the cost of one real token once credits exist --
+    negligible against the plan's per-request dollar budget.
+    """
+    import urllib.error
+    import urllib.request
+    token = tier_token(t)
+    if not token:
+        return False, f"{t['name']}: set {t.get('tokenEnvVar', 'OPENCODE_GO_API_KEY')}"
+    url = t["baseUrl"].rstrip("/") + "/v1/messages"
+    payload = json.dumps({
+        "model": t.get("model", "qwen3.7-plus"), "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ping"}],
+    }).encode()
+    req = urllib.request.Request(
+        url, data=payload, method="POST",
+        headers={"content-type": "application/json",
+                 # A generic urllib/Python user agent gets a bare 403 here --
+                 # verified live. OpenCode Go's own docs ask non-SDK clients
+                 # to identify themselves rather than impersonate one.
+                 "user-agent": "delegation-governor/dg-doctor",
+                 "x-opencode-session": "dg-probe", **_auth_headers(t)})
+    try:
+        with urllib.request.urlopen(req, timeout=t.get("probeTimeoutSeconds", 8)) as r:
+            body = json.loads(r.read())
+        return True, f"{t['name']}: {t['baseUrl']} ready ({t.get('model', '?')})"
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read())
+        except (ValueError, OSError):
+            return False, f"{t['name']}: HTTP {e.code} with no JSON body"
+        kind = str((body.get("error") or {}).get("type", ""))
+        message = str((body.get("error") or {}).get("message", ""))
+        if kind == "CreditsError":
+            return False, f"{t['name']}: authenticated, but {message or 'no payment method on file'}"
+        if e.code in (401, 403):
+            return False, f"{t['name']}: not authorised ({kind or e.code}); " \
+                          f"set {t.get('tokenEnvVar')}"
+        return False, f"{t['name']}: HTTP {e.code} ({kind or 'unknown error'})"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return False, f"{t['name']}: {t['baseUrl']} unreachable ({type(e).__name__})"
 
 
 def first_usable_tier(cfg: dict, load: bool = False) -> tuple[dict | None, list[str]]:

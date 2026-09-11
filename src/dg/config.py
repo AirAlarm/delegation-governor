@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 4,
+    "schemaVersion": 5,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -52,16 +52,26 @@ DEFAULTS: dict[str, Any] = {
             # Codex, the local GPU, or Oracle.
             "openrouter": {"worker": "cc-delegate", "profile": "openrouter-coder",
                            "maxWriteJobs": 1, "endpoint": "openrouter"},
+            # OpenCode Go: a second metered cloud lane, reached through its own
+            # cc-delegate profile and endpoint so it never contends with
+            # OpenRouter's slot or budget.
+            "opencode": {"worker": "cc-delegate", "profile": "opencode-go",
+                         "maxWriteJobs": 1, "endpoint": "opencode"},
         },
         # Preferred lanes per task class, best first. A lane that is busy,
         # unavailable or excluded is skipped, so this is a preference, not a
         # pin. Reorder freely -- e.g. put codex first everywhere to keep local
         # models idle while the subscription lasts.
         "classRouting": {
-            "hard": ["codex", "openrouter", "station"],
-            "standard": ["openrouter", "codex", "station", "oracle"],
-            "simple": ["station", "openrouter", "oracle", "codex"],
-            "tiny": ["oracle", "station", "openrouter"],
+            # OpenRouter runs on its free tier here (no credits purchased), so
+            # its model is a *shared* pool subject to other users' demand --
+            # verified live: a 15-req/min shared cap tripped mid-task. OpenCode
+            # Go is a paid, per-account subscription with generous per-model
+            # limits, so it leads; OpenRouter stays as a free bonus lane.
+            "hard": ["codex", "opencode", "openrouter", "station"],
+            "standard": ["opencode", "openrouter", "codex", "station", "oracle"],
+            "simple": ["station", "opencode", "openrouter", "oracle", "codex"],
+            "tiny": ["oracle", "station", "opencode", "openrouter"],
         },
         "defaultClass": "standard",
         "totalWriteJobsPerRepo": 4,
@@ -84,6 +94,31 @@ DEFAULTS: dict[str, Any] = {
                 "tokenEnvVar": "OPENROUTER_API_KEY",
                 "tokenFile": "~/.cc-delegate/credentials.json",
                 "tokenFileKey": "OPENROUTER_API_KEY",
+                "probeTimeoutSeconds": 10,
+            },
+            # OpenCode Go speaks the Anthropic Messages API natively at
+            # <baseUrl>/v1/messages (verified live). It needs its own probe
+            # ("kind": "opencode") rather than the generic invalid-POST check:
+            # verified live, a workspace with no payment method on file gets
+            # HTTP 401 + {"error":{"type":"CreditsError"}} for a *correctly
+            # authenticated* key -- the generic probe treats any 401 as a bad
+            # key, which would misdiagnose "add a card" as "fix your token".
+            "opencode": {
+                "name": "opencode",
+                "kind": "opencode",
+                "baseUrl": "https://opencode.ai/zen/go",
+                # qwen3.7-plus: generous $12/5h-$30/wk-$60/mo tier (~21,600
+                # req/mo). qwen3.8-max looked stronger but is the *tightest*
+                # limit on the whole plan (~810 req/mo) -- a bad default for a
+                # lane meant to absorb routine delegated work. kimi-k2.7-code
+                # is explicitly coding-branded and equally generous, but
+                # verified live to 500 on this Anthropic-compatible endpoint
+                # (works on the OpenAI-compatible one instead) -- not used
+                # here since the probe and this profile both need /v1/messages.
+                "model": "qwen3.7-plus",
+                "tokenEnvVar": "OPENCODE_GO_API_KEY",
+                "tokenFile": "~/.cc-delegate/credentials.json",
+                "tokenFileKey": "OPENCODE_GO_API_KEY",
                 "probeTimeoutSeconds": 10,
             },
         },
@@ -210,6 +245,17 @@ def _migrate(stored: dict) -> dict:
             workers["totalWriteJobsPerRepo"] = 4
         if workers.get("maxReadOnlyJobs") == 3:
             workers["maxReadOnlyJobs"] = 4
+    if have < 5:
+        workers = stored.setdefault("workers", {})
+        routing = workers.setdefault("classRouting", {})
+        desired = DEFAULTS["workers"]["classRouting"]
+        for task_class, defaults in desired.items():
+            current = routing.get(task_class)
+            if current is None:
+                continue  # deep merge will supply the new default
+            if "opencode" not in current:
+                position = defaults.index("opencode")
+                current.insert(min(position, len(current)), "opencode")
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]
     bak = CONFIG_PATH.with_suffix(f".v{have}."
                                   f"{time.strftime('%Y%m%d-%H%M%S')}.json")

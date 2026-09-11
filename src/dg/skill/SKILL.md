@@ -28,10 +28,15 @@ PLAN -> LEDGER -> DISPATCH -> DON'T WAIT -> OTHER READY WORK
    ambiguity, dangerous changes, final review: yours. See `references/rubric.md`.
 5. **Bounded work orders only.** Never paste conversation history to a worker.
    `dg workorder <id>` renders the contract; the worker reads the repo itself.
-6. **Classify tasks and fill every lane.** Codex, the GPU box, the VM, and
-   OpenRouter are four independent endpoints. `--class
+6. **Classify tasks and fill every lane.** Codex, the GPU box, the VM,
+   OpenRouter and OpenCode Go are five independent endpoints. `--class
    tiny|simple|standard|hard` decides preference; `dg fill` puts work in all
    available lanes instead of one at a time.
+7. **Prefer the ephemeral patterns for small, one-off work.** `dg quickread`
+   (multi-file reconnaissance) and `dg safewrite` (reference-based boilerplate)
+   skip the ledger entirely -- cheaper than a full WRITE task for something
+   that doesn't need review or integration. See `references/bulk_read.md` and
+   `references/code_write.md`.
 
 ## Minimum commands
 
@@ -63,3 +68,5 @@ Keep decisions and review; hand over all the typing.
 | `references/workers.md` | Codex vs cc-delegate, fallback, recovery |
 | `references/review.md` | collecting, reviewing and integrating results |
 | `references/recovery.md` | quota exhaustion, LOCAL supervisor, failures |
+| `references/bulk_read.md` | delegating a multi-file read/question, no ledger task |
+| `references/code_write.md` | delegating reference-based boilerplate generation |
