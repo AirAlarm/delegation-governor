@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config, gitutil, quota_codex, routing, scheduler, store, supervisor, sync, workorder
-from . import quickread
+from . import quickread, safewrite
 from .workers import cc_delegate
 from .workers import codex_plugin
 
@@ -1000,6 +1000,12 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("quickread", quickread.run,
             help="prepare files for one-shot read-only delegation")
     s.add_argument("paths", nargs="+", metavar="PATH")
+
+    s = add("safewrite", safewrite.run,
+            help="atomically write one generated file")
+    s.add_argument("target", metavar="TARGET")
+    s.add_argument("--from", dest="source", required=True, metavar="CONTENT_FILE")
+    s.add_argument("--force", action="store_true", help="replace an existing target")
 
     s = add("fill", cmd_fill,
             help="start one READY task in every free lane, non-blocking")
