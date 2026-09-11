@@ -41,7 +41,10 @@ class TestOpenRouterConfig(DGTest):
         self.assertEqual(self.cfg["workers"]["totalWriteJobsPerRepo"], 4)
         self.assertNotIn("openrouter", [x["name"] for x in self.cfg["supervisorFallbacks"]])
 
-    def test_v3_config_is_extended_without_losing_its_order(self):
+    def test_v3_config_migrates_to_the_current_schema(self):
+        """v6's classRouting change (drop OpenRouter, reorder) isn't an
+        additive tweak like v4/v5 -- it replaces classRouting outright rather
+        than trying to preserve a custom order against a changed shape."""
         config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         config.CONFIG_PATH.write_text(json.dumps({
             "schemaVersion": 3,
@@ -52,9 +55,9 @@ class TestOpenRouterConfig(DGTest):
             },
         }), "utf-8")
         migrated = config.load()
-        self.assertEqual(migrated["schemaVersion"], 5)
-        self.assertEqual(migrated["workers"]["classRouting"]["hard"],
-                         ["station", "opencode", "codex", "openrouter"])
+        self.assertEqual(migrated["schemaVersion"], 6)
+        self.assertEqual(migrated["workers"]["classRouting"],
+                         config.DEFAULTS["workers"]["classRouting"])
         self.assertEqual(migrated["workers"]["totalWriteJobsPerRepo"], 4)
         self.assertTrue(list(config.CONFIG_PATH.parent.glob("config.v3.*.json")))
 

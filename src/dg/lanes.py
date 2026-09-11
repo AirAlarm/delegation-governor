@@ -84,13 +84,25 @@ def availability(con: sqlite3.Connection, cfg: dict, refresh: bool = True) -> di
 
     The cache is what keeps dispatch cheap: without it every `dg tasks` would
     pay a round trip to the Oracle box.
+
+    A down verdict is trusted for a much shorter window than an up one
+    (`laneProbeDownTtlSeconds`, default 10s vs. 60s). Without this, one
+    transient blip on a flaky remote (verified live: OpenCode Go's endpoint)
+    gets cached for the full TTL, so an entire dispatch burst (`dg fill`
+    across several tasks) consistently skips a lane that already recovered.
+
+    `refresh=False` (hooks: any answer beats a round-trip) returns cached
+    whenever present, however stale. `refresh=True` (default) additionally
+    requires it be within the effective TTL, else a live probe runs.
     """
     ttl = cfg["workers"].get("laneProbeTtlSeconds", 60)
+    down_ttl = cfg["workers"].get("laneProbeDownTtlSeconds", 10)
     cached = store.kv_get(con, _PROBE_KEY) or {}
     age = store.kv_age(con, _PROBE_KEY)
-    if cached and age is not None and age < ttl and not refresh:
+    if cached and not refresh:
         return cached
-    if cached and age is not None and age < ttl:
+    effective_ttl = down_ttl if any(not v[0] for v in cached.values()) else ttl
+    if cached and age is not None and age < effective_ttl:
         return cached
 
     from . import launcher, supervisor

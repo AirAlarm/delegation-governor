@@ -46,15 +46,15 @@ class TestClassRouting(LaneTest):
     def test_tiny_prefers_the_vm(self):
         self.assertEqual(self.choose(self.task(task_class="tiny"))["lane"], "oracle")
 
-    def test_standard_prefers_opencode(self):
-        self.assertEqual(self.choose(self.task(task_class="standard"))["lane"], "opencode")
+    def test_standard_prefers_codex(self):
+        self.assertEqual(self.choose(self.task(task_class="standard"))["lane"], "codex")
 
     def test_unknown_class_falls_back_to_the_default(self):
         tid = self.task()
         self.con.execute("UPDATE tasks SET task_class='nonsense' WHERE id=?", (tid,))
         out = self.choose(tid)
         self.assertEqual(out["taskClass"], "standard")
-        self.assertEqual(out["lane"], "opencode")
+        self.assertEqual(out["lane"], "codex")
 
     def test_routing_table_is_configurable(self):
         self.cfg["workers"]["classRouting"]["hard"] = ["oracle", "codex"]
@@ -75,29 +75,30 @@ class TestFallThrough(LaneTest):
         self.assertIn("codex: CODEX_EXHAUSTED", out["skipped"])
 
     def test_no_lane_left_is_reported_not_guessed(self):
-        for lane in ("codex", "station", "oracle", "openrouter", "opencode"):
+        for lane in ("codex", "opencode", "station", "oracle"):
             self.avail[lane] = [False, "down"]
         out = self.choose(self.task())
         self.assertIsNone(out["lane"])
         self.assertIn("no lane available", out["reason"])
-        self.assertEqual(len(out["skipped"]), 5)
+        self.assertEqual(len(out["skipped"]), 4)
 
     def test_hard_uses_opencode_before_the_local_gpu(self):
         self.avail["codex"] = [False, "down"]
         self.assertEqual(self.choose(self.task(task_class="hard"))["lane"], "opencode")
 
-    def test_hard_never_lands_on_the_slow_vm(self):
+    def test_hard_falls_all_the_way_to_the_slow_vm_as_last_resort(self):
+        """Oracle is now in hard's own chain (user request) -- only a total
+        outage of everything else should leave a hard task unplaced."""
         self.avail["codex"] = [False, "down"]
-        self.avail["openrouter"] = [False, "down"]
         self.avail["opencode"] = [False, "down"]
         self.avail["station"] = [False, "down"]
-        self.assertIsNone(self.choose(self.task(task_class="hard"))["lane"])
+        self.assertEqual(self.choose(self.task(task_class="hard"))["lane"], "oracle")
 
     def test_manual_worker_override_pins_the_tool(self):
         self.cfg["overrides"]["worker"] = "cc-delegate"
         out = self.choose(self.task(task_class="hard"))
         self.assertEqual(out["worker"], "cc-delegate")
-        self.assertIn(out["lane"], ("opencode", "openrouter", "station", "oracle"))
+        self.assertIn(out["lane"], ("opencode", "station", "oracle"))
 
 
 class TestCapacity(LaneTest):

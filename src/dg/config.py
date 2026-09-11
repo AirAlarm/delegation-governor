@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 5,
+    "schemaVersion": 6,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -63,15 +63,22 @@ DEFAULTS: dict[str, Any] = {
         # pin. Reorder freely -- e.g. put codex first everywhere to keep local
         # models idle while the subscription lasts.
         "classRouting": {
-            # OpenRouter runs on its free tier here (no credits purchased), so
-            # its model is a *shared* pool subject to other users' demand --
-            # verified live: a 15-req/min shared cap tripped mid-task. OpenCode
-            # Go is a paid, per-account subscription with generous per-model
-            # limits, so it leads; OpenRouter stays as a free bonus lane.
-            "hard": ["codex", "opencode", "openrouter", "station"],
-            "standard": ["opencode", "openrouter", "codex", "station", "oracle"],
-            "simple": ["station", "opencode", "openrouter", "oracle", "codex"],
-            "tiny": ["oracle", "station", "opencode", "openrouter"],
+            # OpenRouter is off for now (user request): it runs on its free
+            # tier here (no credits purchased), so its model is a *shared*
+            # pool subject to other users' demand -- verified live, a
+            # 15-req/min shared cap tripped mid-task, twice. Left out of every
+            # list below rather than removed from "lanes"/"endpoints", so it's
+            # a one-line re-add once there's a reason to trust it again.
+            #
+            # hard/standard: codex leads (strongest model), opencode second.
+            # simple/tiny: local-first is preserved on purpose (station/oracle
+            # respectively) so trivial work doesn't eat the Codex slot -- see
+            # test_simple_prefers_the_gpu_box_over_codex -- opencode just moves
+            # ahead of the *other* local lane within that.
+            "hard": ["codex", "opencode", "station", "oracle"],
+            "standard": ["codex", "opencode", "station", "oracle"],
+            "simple": ["station", "opencode", "oracle", "codex"],
+            "tiny": ["oracle", "opencode", "station"],
         },
         "defaultClass": "standard",
         "totalWriteJobsPerRepo": 4,
@@ -79,6 +86,10 @@ DEFAULTS: dict[str, Any] = {
         # How long a lane's availability probe is trusted, so dispatch does not
         # re-probe a slow remote every time.
         "laneProbeTtlSeconds": 60,
+        # A down verdict is trusted for much less time than an up one, so one
+        # transient blip doesn't make a whole dispatch burst skip a lane that
+        # has already recovered.
+        "laneProbeDownTtlSeconds": 10,
         # A worker past this is SLOW, not failed. No hard kill by default.
         "slowAfterSeconds": 900,
         "hardTimeoutSeconds": 0,
@@ -236,9 +247,13 @@ def _migrate(stored: dict) -> dict:
             current = routing.get(task_class)
             if current is None:
                 continue  # deep merge will supply the new default
-            if "openrouter" not in current:
+            if "openrouter" in defaults and "openrouter" not in current:
                 # Preserve the user's relative order and place the new lane at
                 # the same preference point used by a fresh v4 config.
+                # (v6 later drops openrouter from DEFAULTS entirely and
+                # overwrites classRouting outright, making this insertion
+                # moot when migrating all the way from v3 -- the `in defaults`
+                # guard just keeps this step itself from crashing.)
                 position = defaults.index("openrouter")
                 current.insert(min(position, len(current)), "openrouter")
         if workers.get("totalWriteJobsPerRepo") == 3:
@@ -256,6 +271,14 @@ def _migrate(stored: dict) -> dict:
             if "opencode" not in current:
                 position = defaults.index("opencode")
                 current.insert(min(position, len(current)), "opencode")
+    if have < 6:
+        # Not an additive tweak like the previous two migrations: OpenRouter
+        # is being dropped from every class (unreliable free tier) and the
+        # preference order actually changed (codex now leads hard/standard).
+        # A user's own custom classRouting can't be meaningfully reconciled
+        # against that, so this replaces it outright rather than patching it.
+        workers = stored.setdefault("workers", {})
+        workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]
     bak = CONFIG_PATH.with_suffix(f".v{have}."
                                   f"{time.strftime('%Y%m%d-%H%M%S')}.json")
