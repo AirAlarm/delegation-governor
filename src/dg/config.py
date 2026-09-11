@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 6,
+    "schemaVersion": 7,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -44,9 +44,17 @@ DEFAULTS: dict[str, Any] = {
             # while the supervisor itself is running there.
             "station": {"worker": "cc-delegate", "profile": "station-main",
                         "maxWriteJobs": 1, "tier": "lmstudio"},
-            # A separate CPU VM: slow, but contends with nothing.
+            # A separate CPU VM: slow, but doesn't contend with station/codex.
+            # It DOES contend with itself, though -- verified live 2026-09-11
+            # and again 2026-09-12: two oracle-coder jobs dispatched together
+            # (both "tiny", single-string-rename-scale) started and ended at
+            # the exact same second, one pair stalling out and the other
+            # burning the full 30-minute run timeout with zero progress on
+            # either. maxWriteJobs=2 assumed Oracle could usefully serve two
+            # concurrent generations; the evidence says it can't -- 1 until
+            # there's a reason to believe otherwise.
             "oracle": {"worker": "cc-delegate", "profile": "oracle-coder",
-                       "maxWriteJobs": 2, "tier": "oracle"},
+                       "maxWriteJobs": 1, "tier": "oracle"},
             # A metered cloud lane reached through an explicit cc-delegate
             # profile. It has its own slot and therefore never waits for
             # Codex, the local GPU, or Oracle.
@@ -66,19 +74,29 @@ DEFAULTS: dict[str, Any] = {
             # OpenRouter is off for now (user request): it runs on its free
             # tier here (no credits purchased), so its model is a *shared*
             # pool subject to other users' demand -- verified live, a
-            # 15-req/min shared cap tripped mid-task, twice. Left out of every
-            # list below rather than removed from "lanes"/"endpoints", so it's
-            # a one-line re-add once there's a reason to trust it again.
+            # 15-req/min shared cap tripped mid-task, twice.
+            #
+            # Oracle is off entirely (user request, 2026-09-12): two
+            # oracle-coder jobs dispatched concurrently -- which "tiny" led
+            # with and maxWriteJobs=2 explicitly allowed -- reliably starved
+            # each other into total failure rather than merely running
+            # slower side by side (verified live twice: DG-18/19 stalled,
+            # DG-42/43 both burned the full 30-min run timeout with zero
+            # progress). Not worth the ongoing cost of finding out whether a
+            # concurrency-1 fix actually holds.
+            #
+            # Both are left out of every list below rather than removed from
+            # "lanes"/"endpoints", so either is a one-line re-add if there's
+            # ever a reason to trust it again.
             #
             # hard/standard: codex leads (strongest model), opencode second.
-            # simple/tiny: local-first is preserved on purpose (station/oracle
-            # respectively) so trivial work doesn't eat the Codex slot -- see
-            # test_simple_prefers_the_gpu_box_over_codex -- opencode just moves
-            # ahead of the *other* local lane within that.
-            "hard": ["codex", "opencode", "station", "oracle"],
-            "standard": ["codex", "opencode", "station", "oracle"],
-            "simple": ["station", "opencode", "oracle", "codex"],
-            "tiny": ["oracle", "opencode", "station"],
+            # simple/tiny: local-first is preserved on purpose (station) so
+            # trivial work doesn't eat the Codex slot -- see
+            # test_simple_prefers_the_gpu_box_over_codex.
+            "hard": ["codex", "opencode", "station"],
+            "standard": ["codex", "opencode", "station"],
+            "simple": ["station", "opencode", "codex"],
+            "tiny": ["station", "opencode"],
         },
         "defaultClass": "standard",
         "totalWriteJobsPerRepo": 4,
@@ -277,6 +295,20 @@ def _migrate(stored: dict) -> dict:
         # preference order actually changed (codex now leads hard/standard).
         # A user's own custom classRouting can't be meaningfully reconciled
         # against that, so this replaces it outright rather than patching it.
+        workers = stored.setdefault("workers", {})
+        workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
+    if have < 7:
+        # Two concurrent oracle-coder jobs verified live to starve each
+        # other into total failure (both hit the full 30-min run timeout,
+        # zero progress) rather than merely running slower side by side --
+        # and then Oracle was dropped from routing entirely (user request).
+        # Only touch maxWriteJobs if it's still at the old default -- an
+        # explicit user override stays theirs. classRouting is replaced
+        # outright again, same reasoning as the v6 migration: not an
+        # additive tweak, a lane is being removed from every class.
+        oracle = stored.get("workers", {}).get("lanes", {}).get("oracle")
+        if isinstance(oracle, dict) and oracle.get("maxWriteJobs") == 2:
+            oracle["maxWriteJobs"] = 1
         workers = stored.setdefault("workers", {})
         workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]
