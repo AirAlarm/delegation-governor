@@ -12,19 +12,25 @@ from typing import Any
 
 from . import store
 from .workers import cc_delegate
-from .workers import codex as codex_worker
+from .workers import codex_plugin
 
 
-def reconcile(con: sqlite3.Connection, cfg: dict) -> dict[str, Any]:
+def reconcile(con: sqlite3.Connection, cfg: dict, force: bool = False) -> dict[str, Any]:
     changed: list[dict[str, str]] = []
     slow: list[str] = []
     wcfg = cfg["workers"]
     now = time.time()
 
     for a in store.running_attempts(con):
+        if a["status"] == "RESERVED":
+            # A reservation occupies capacity but has no external job yet.
+            # It is released only explicitly: the MCP/plugin launch may have
+            # succeeded even if its acknowledgement was lost.
+            continue
         age = now - float(a["started_at"])
         last = a.get("last_checked_at") or 0
-        if now - last < wcfg["minCheckSpacingSeconds"] and age < wcfg["slowAfterSeconds"]:
+        if (not force and now - last < wcfg["minCheckSpacingSeconds"]
+                and age < wcfg["slowAfterSeconds"]):
             continue  # respect minimum check spacing (spec 22)
 
         if a["worker"] == "cc-delegate":
@@ -33,20 +39,11 @@ def reconcile(con: sqlite3.Connection, cfg: dict) -> dict[str, Any]:
                 changed.append({"task": a["task_id"], "status": new, "worker": a["worker"]})
                 continue
         elif a["worker"] == "codex":
-            store.touch_attempt(con, a["id"])
-            # The runner writes the outcome itself; a dead runner that wrote
-            # nothing is the only case we have to clean up here.
-            if not codex_worker.alive(a.get("handle")):
-                fresh = con.execute("SELECT status FROM attempts WHERE id=?",
-                                    (a["id"],)).fetchone()
-                if fresh and fresh["status"] == "RUNNING":
-                    store.finish_attempt(con, a["id"], "FAILED", "worker execution failed",
-                                         "runner exited without recording a result")
-                    store.set_status(con, a["task_id"], "FAILED",
-                                     failure_reason="codex runner vanished")
-                    changed.append({"task": a["task_id"], "status": "FAILED",
-                                    "worker": "codex"})
-                    continue
+            new = codex_plugin.sync(con, a)
+            if new:
+                changed.append({"task": a["task_id"], "status": new,
+                                "worker": "codex"})
+                continue
 
         hard = wcfg["hardTimeoutSeconds"]
         if hard and age > hard:

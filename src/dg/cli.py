@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import shutil
@@ -13,7 +14,7 @@ from typing import Any
 
 from . import config, gitutil, quota_codex, routing, scheduler, store, supervisor, sync, workorder
 from .workers import cc_delegate
-from .workers import codex as codex_worker
+from .workers import codex_plugin
 
 
 def _session_id() -> str:
@@ -241,7 +242,7 @@ def cmd_workorder(args) -> int:
 
 
 def cmd_dispatch(args) -> int:
-    """Claim a task, start Codex on it, return immediately."""
+    """Reserve a lane, start its worker, and return immediately."""
     con = store.connect()
     cfg = _cfg_with_overrides(con)
     t = store.get_task(con, args.id)
@@ -256,16 +257,25 @@ def cmd_dispatch(args) -> int:
 
     from . import lanes as lanes_mod
     if args.worker:
-        lane_choice = {"lane": None, "worker": args.worker, "profile": None,
-                       "taskClass": t.get("taskClass"), "reason": "explicit --worker"}
+        forced = copy.deepcopy(cfg)
+        forced["overrides"]["worker"] = args.worker
+        lane_choice = lanes_mod.choose(con, forced, t)
     else:
         lane_choice = routing.select_for(con, cfg, t)
-        if lane_choice["worker"] is None:
-            print(f"{args.id}: {lane_choice['reason']}", file=sys.stderr)
-            for sk in lane_choice.get("skipped", []):
-                print(f"  {sk}", file=sys.stderr)
-            return 6
+    if lane_choice["worker"] is None:
+        print(f"{args.id}: {lane_choice['reason']}", file=sys.stderr)
+        for sk in lane_choice.get("skipped", []):
+            print(f"  {sk}", file=sys.stderr)
+        return 6
     worker = lane_choice["worker"]
+    reservation = store.reserve_attempt(
+        con, t["id"], _session_id(), worker, lane_choice["lane"], cfg,
+        profile=lane_choice.get("profile"),
+        transport="codex-plugin" if worker == routing.CODEX else "cc-delegate-mcp")
+    if not reservation["ok"]:
+        print(f"{args.id}: {reservation['reason']}", file=sys.stderr)
+        return 4
+    attempt_id = reservation["attemptId"]
     if worker == routing.CC_DELEGATE:
         # cc-delegate is MCP-only: hand Claude the work order and the profile,
         # then `dg attach` once run_dev_task returns its task id.
@@ -276,24 +286,17 @@ def cmd_dispatch(args) -> int:
                           "taskId": t["id"], "repo": t["repo"],
                           "lane": lane_choice.get("lane"),
                           "profile": lane_choice.get("profile"),
+                          "attemptId": attempt_id,
                           "taskClass": lane_choice.get("taskClass"),
                           "then": f"dg attach {t['id']} <cc-task-id> "
-                                  f"--lane {lane_choice.get('lane') or ''}".rstrip(),
+                                  f"--attempt {attempt_id}",
                           "workOrder": order}, indent=2))
         return 0
 
-    if not scheduler.worker_capacity_free(con, worker, t["repo"], cfg):
-        print(f"codex write capacity full for {t['repo']}", file=sys.stderr)
-        return 3
-    if not store.claim(con, args.id, _session_id(), worker) and not args.force:
-        print(f"{args.id} was claimed by another session", file=sys.stderr)
-        return 4
-
     order = _order(t, args, "(the working directory below)")
-    res = codex_worker.dispatch(con, t, order, _session_id(), sandbox=args.sandbox,
-                                lane=lane_choice.get("lane") or "codex")
+    res = codex_plugin.dispatch(con, t, order, attempt_id)
     if not res.get("ok"):
-        store.release(con, args.id)
+        store.release_reservation(con, args.id)
         print(res.get("error", "dispatch failed"), file=sys.stderr)
         return 5
     res["task"] = args.id
@@ -319,13 +322,85 @@ def cmd_attach(args) -> int:
     if not t:
         print(f"no such task {args.id}", file=sys.stderr)
         return 1
-    if t["status"] == "PLANNED":
-        store.claim(con, args.id, _session_id(), routing.CC_DELEGATE)
     res = cc_delegate.attach(con, t, args.cc_task_id,
-                             args.work_order or "(recorded by Claude)", lane=args.lane)
+                             args.work_order or "(recorded by Claude)", lane=args.lane,
+                             attempt_id=args.attempt)
     from . import lanes as lanes_mod
     lanes_mod.invalidate(con)
     return _emit(res, True)
+
+
+def cmd_release(args) -> int:
+    with store.session() as con:
+        ok = store.release_reservation(con, args.id)
+    if not ok:
+        print(f"{args.id} has no releasable reservation", file=sys.stderr)
+        return 1
+    return _emit({"task": args.id, "status": "PLANNED", "released": True}, True)
+
+
+def cmd_cancel(args) -> int:
+    with store.session() as con:
+        t = store.get_task(con, args.id)
+        a = store.live_attempt(con, args.id)
+        if not t or not a:
+            print(f"{args.id} has no active attempt", file=sys.stderr)
+            return 1
+        a["repo"] = t["repo"]
+        if a["status"] == "RESERVED":
+            store.release_reservation(con, args.id)
+            return _emit({"task": args.id, "status": "PLANNED", "released": True}, True)
+        if a["worker"] != routing.CODEX:
+            return _emit({"ok": False, "task": args.id,
+                          "action": "cancel this cc-delegate job through its MCP tool",
+                          "externalJobId": a.get("external_job_id")}, True)
+        result = codex_plugin.cancel(a)
+        if result.get("ok"):
+            store.finish_attempt(con, a["id"], "CANCELLED", "cancelled by user")
+            store.set_status(con, args.id, "CANCELLED", failure_reason="cancelled by user")
+        return _emit(result, True)
+
+
+def cmd_recover_handoffs(args) -> int:
+    recovered, ambiguous = [], []
+    with store.session() as con:
+        for a in store.reserved_attempts(con):
+            candidates: list[dict[str, Any]] = []
+            if a["worker"] == routing.CODEX:
+                candidates = codex_plugin.recovery_candidates(a["task_id"], a["id"])
+                if len(candidates) == 1:
+                    c = candidates[0]
+                    job = codex_plugin.read_job(c["jobId"]) or {}
+                    wt = job.get("workspaceRoot")
+                    store.activate_attempt(
+                        con, a["id"], f"codex-plugin:{c['jobId']}", worktree=wt,
+                        branch=gitutil.current_branch(wt) if wt and gitutil.is_repo(wt) else None,
+                        log_path=job.get("logFile"), external_job_id=c["jobId"])
+                    recovered.append({"task": a["task_id"], **c})
+                    continue
+            else:
+                jobs = Path(a["repo"]) / ".cc-delegate" / "jobs"
+                if jobs.is_dir():
+                    for p in jobs.glob("*.json"):
+                        if p.stat().st_mtime + 1 < float(a.get("reserved_at") or 0):
+                            continue
+                        try:
+                            job = json.loads(p.read_text("utf-8"))
+                        except (OSError, ValueError):
+                            continue
+                        candidates.append({"jobId": str(job.get("taskId") or p.stem),
+                                           "status": job.get("status"), "jobFile": str(p)})
+                    if len(candidates) == 1:
+                        t = store.get_task(con, a["task_id"])
+                        res = cc_delegate.attach(con, t, candidates[0]["jobId"],
+                                                 "(recovered)", attempt_id=a["id"])
+                        if res.get("ok"):
+                            recovered.append({"task": a["task_id"], **candidates[0]})
+                            continue
+            if candidates:
+                ambiguous.append({"task": a["task_id"], "attemptId": a["id"],
+                                  "candidates": candidates})
+    return _emit({"recovered": recovered, "ambiguous": ambiguous}, True)
 
 
 def cmd_fallback(args) -> int:
@@ -339,11 +414,7 @@ def cmd_fallback(args) -> int:
     if t["status"] not in ("QUOTA_FAILED", "AUTH_FAILED", "FAILED"):
         print(f"{args.id} is {t['status']}, nothing to fall back from", file=sys.stderr)
         return 2
-    new = store.create_task(
-        con, title=t["title"], mode=t["mode"], goal=t["goal"], repo=t["repo"],
-        paths=t["paths"], depends_on=t["dependsOn"], priority=t["priority"] + 1)
-    store.set_status(con, args.id, "SUPERSEDED",
-                     failure_reason=f"{t['status']}; superseded by {new}")
+    new = store.create_fallback(con, t)
     # Partial worker output is preserved on disk but never carried into the
     # retry: the fallback starts from the original clean base (spec 34).
     return _emit({"original": args.id, "fallback": new,
@@ -355,7 +426,7 @@ def cmd_collect(args) -> int:
     """Pull a finished attempt's result for review."""
     con = store.connect()
     cfg = _cfg_with_overrides(con)
-    sync.reconcile(con, cfg)
+    sync.reconcile(con, cfg, force=True)
     t = store.get_task(con, args.id)
     if not t:
         print(f"no such task {args.id}", file=sys.stderr)
@@ -370,6 +441,32 @@ def cmd_collect(args) -> int:
             out["result"] = json.loads(Path(t["resultLocation"]).read_text("utf-8"))
         except ValueError:
             out["result"] = {"raw": Path(t["resultLocation"]).read_text("utf-8")[:4000]}
+    if t["status"] == "SUCCEEDED" and t["mode"] == "WRITE":
+        completed = [a for a in atts if a["status"] == "SUCCEEDED" and a.get("worktree")]
+        if completed:
+            a = completed[-1]
+            wt = a["worktree"]
+            if Path(wt).exists():
+                snap = gitutil.snapshot(wt, f"feat(dg): {t['id']} {t['title']}")
+                head = gitutil.head_commit(wt)
+                changed = gitutil.git(t["repo"], "diff", "--name-only",
+                                      f"{t['baseCommit']}..{head}", check=False).stdout.splitlines()
+                violations = []
+                if t["paths"]:
+                    import fnmatch
+                    for path in changed:
+                        norm = path.replace("\\", "/")
+                        if not any(fnmatch.fnmatch(norm, p.replace("\\", "/")) or
+                                   norm.startswith(p.replace("\\", "/").rstrip("*/") + "/")
+                                   for p in t["paths"]):
+                            violations.append(path)
+                out["review"] = {
+                    "branch": a.get("branch"), "baseCommit": t["baseCommit"],
+                    "headCommit": head, "snapshotted": snap, "changedFiles": changed,
+                    "contractViolations": violations,
+                    "merge": f"git merge --no-ff {a.get('branch')}",
+                    "cherryPick": f"git cherry-pick {head}",
+                }
     view = scheduler.evaluate(con, cfg)
     out["unblockedNow"] = [r["id"] for r in scheduler.ready(view["tasks"])]
     return _emit(out, True)
@@ -381,21 +478,46 @@ def cmd_integrate(args) -> int:
     if not t:
         print(f"no such task {args.id}", file=sys.stderr)
         return 1
-    if t["status"] != "SUCCEEDED" and not args.force:
+    if t["status"] != "SUCCEEDED":
         print(f"{args.id} is {t['status']}, expected SUCCEEDED", file=sys.stderr)
         return 2
-    store.set_status(con, args.id, "INTEGRATED")
+    verification: dict[str, Any] = {"integrated": True, "method": "read-only"}
+    work_attempts = [a for a in store.attempts_for(con, args.id)
+                     if a["status"] == "SUCCEEDED" and a.get("branch")]
+    if t["mode"] == "WRITE":
+        if not work_attempts:
+            print(f"{args.id} has no successful worker branch", file=sys.stderr)
+            return 3
+        a = work_attempts[-1]
+        if a.get("worktree") and Path(a["worktree"]).exists():
+            gitutil.snapshot(a["worktree"], f"feat(dg): {t['id']} {t['title']}")
+        verification = gitutil.integration_state(t["repo"], a["branch"], t["baseCommit"])
+        accepted = args.accept_equivalent or args.force
+        if not verification["integrated"] and not accepted:
+            _emit({"task": args.id, "status": "SUCCEEDED", "verified": False,
+                   "verification": verification,
+                   "next": f"merge or cherry-pick {a['branch']}, then retry"}, True)
+            return 4
+        if not verification["integrated"] and accepted and not args.note:
+            print("--accept-equivalent requires --note", file=sys.stderr)
+            return 5
+        if accepted and not verification["integrated"]:
+            verification = {**verification, "integrated": True,
+                            "method": "accepted-equivalent", "note": args.note}
+    store.set_status(con, args.id, "INTEGRATED",
+                     failure_reason=(f"integration override: {args.note}"
+                                     if verification["method"] == "accepted-equivalent" else None))
     cleaned = []
     if args.cleanup:
         for a in store.attempts_for(con, args.id):
-            if a["worktree"] and a["worker"] == "codex":
+            if a["worktree"]:
                 cleaned.append(gitutil.remove_worktree(
-                    t["repo"], a["worktree"], a["branch"], force=args.discard))
-    out = {"task": args.id, "status": "INTEGRATED", "cleanup": cleaned}
+                    t["repo"], a["worktree"], a["branch"], force=True))
+    out = {"task": args.id, "status": "INTEGRATED", "verification": verification,
+           "cleanup": cleaned}
     kept = [c["keptBranch"] for c in cleaned if c.get("keptBranch")]
     if kept:
-        out["note"] = (f"kept unmerged branch(es) {', '.join(kept)} -- the work is only "
-                       f"there. Merge, or re-run with --cleanup --discard to drop it.")
+        out["note"] = f"kept branch(es) {', '.join(kept)}"
     return _emit(out, True)
 
 
@@ -439,6 +561,13 @@ def cmd_doctor(args) -> int:
 
     chk("governor state dir", config.HOME.exists(), str(config.HOME))
     chk("governor db", config.DB_PATH.exists(), str(config.DB_PATH))
+    from . import install as install_mod
+    chk("managed runtime", install_mod.runtime_python().exists(),
+        str(install_mod.runtime_python()))
+    plugin_info = codex_plugin.discover()
+    chk("Codex Claude plugin", plugin_info["ok"],
+        (f"{plugin_info.get('version')} at {plugin_info.get('root')}"
+         if plugin_info["ok"] else plugin_info["reason"] + "; run /codex:setup"))
     cx = quota_codex.codex_bin()
     chk("codex CLI", bool(cx), cx or "not on PATH")
     if cx:
@@ -466,7 +595,6 @@ def cmd_doctor(args) -> int:
     from . import proxy as proxy_mod
     port = cfg["proxy"]["port"]
     h = proxy_mod.health(port, timeout=1.5)
-    from . import install as install_mod
     env_cur, env_ours = install_mod.proxy_env_state(port)
     if env_ours:
         # Claude is routed through the proxy, so the proxy MUST be up.
@@ -475,9 +603,7 @@ def cmd_doctor(args) -> int:
             "ANTHROPIC_BASE_URL points here but nothing is listening -- "
             "run `dg proxy` (SessionStart normally does)")
         chk("claude routed through router", True,
-            f"{env_cur} -- applies to terminal sessions started after the variable "
-            f"was set. Claude Desktop sets ANTHROPIC_BASE_URL itself and ignores "
-            f"this, so Desktop does NOT route through the proxy.")
+            f"{env_cur} -- terminal Claude Code only; personal Desktop manages its URL")
     else:
         chk("router proxy", True,
             (f"running on :{port}, not wired in" if h else f"not running (:{port})")
@@ -488,6 +614,8 @@ def cmd_doctor(args) -> int:
         chk("last dg launch", True,
             f"route={lp.get('route')} model={lp.get('model')} "
             f"session={lp.get('sessionId')} restarts={lp.get('restarts', 0)}")
+    chk("Claude Desktop routing", True,
+        "not attempted: personal Desktop manages ANTHROPIC_BASE_URL; worker delegation remains active")
 
     plugin = _cc_delegate_root()
     chk("cc-delegate plugin", plugin is not None, str(plugin or "not found (fallback worker)"))
@@ -559,8 +687,8 @@ def cmd_launch(args) -> int:
 def cmd_fill(args) -> int:
     """Start one READY task in every free lane, best task first.
 
-    The scheduler already allows Codex, the GPU box and the VM to run at once;
-    this is what actually puts work in all three instead of one at a time.
+    The scheduler allows Codex, the GPU box, the VM, and OpenRouter to run at
+    once; this puts work in every configured lane instead of one at a time.
     """
     from . import lanes as lanes_mod
     con = store.connect()
@@ -594,26 +722,32 @@ def cmd_fill(args) -> int:
         if args.dry_run:
             started.append(entry)
             continue
+        reservation = store.reserve_attempt(
+            con, task["id"], _session_id(), choice["worker"], choice["lane"], cfg,
+            profile=choice.get("profile"),
+            transport="codex-plugin" if choice["worker"] == routing.CODEX
+            else "cc-delegate-mcp")
+        if not reservation["ok"]:
+            skipped.append({"task": task["id"], "reason": reservation["reason"]})
+            continue
+        attempt_id = reservation["attemptId"]
+        entry["attemptId"] = attempt_id
         if choice["worker"] == routing.CC_DELEGATE:
             # MCP-only: hand Claude the order, it submits and then `dg attach`.
             entry["profile"] = choice["profile"]
             entry["workOrder"] = workorder.build(
                 task, cwd="the isolated git worktree cc-delegate places you in")
-            entry["then"] = f"dg attach {task['id']} <cc-task-id> --lane {choice['lane']}"
+            entry["then"] = (f"dg attach {task['id']} <cc-task-id> "
+                             f"--attempt {attempt_id}")
             handoff.append(entry)
-            # Reserve the lane so the next pick does not choose it again.
-            avail[choice["lane"]] = [False, "reserved for a pending hand-off"]
-            continue
-        if not store.claim(con, task["id"], _session_id(), choice["worker"]):
-            skipped.append({"task": task["id"], "reason": "claimed by another session"})
             continue
         order = workorder.build(task, cwd="(the working directory below)")
-        res = codex_worker.dispatch(con, task, order, _session_id(), lane=choice["lane"])
+        res = codex_plugin.dispatch(con, task, order, attempt_id)
         if not res.get("ok"):
-            store.release(con, task["id"])
+            store.release_reservation(con, task["id"])
             skipped.append({"task": task["id"], "reason": res.get("error", "dispatch failed")})
             continue
-        entry.update(pid=res.get("pid"), worktree=res.get("worktree"))
+        entry.update(jobId=res.get("jobId"), worktree=res.get("worktree"))
         started.append(entry)
         lanes_mod.invalidate(con)
         avail = lanes_mod.availability(con, cfg)
@@ -660,9 +794,7 @@ def cmd_proxy(args) -> int:
         h = proxy.health(port)
         return _emit(h or {"running": False, "port": port}, True)
     if args.stop:
-        print("stop the `dg proxy` process directly (Ctrl-C, or kill its PID)",
-              file=sys.stderr)
-        return 1
+        return _emit(proxy.stop(port), True)
     if (h := proxy.health(port)) and not args.force:
         return _emit({**h, "note": f"a dg proxy is already listening on {port}"}, True)
     if args.start:
@@ -674,6 +806,18 @@ def cmd_proxy(args) -> int:
             return _emit({**(proxy.health(port) or {}), "started": True}, True)
         return _emit({"ok": False, "error": f"proxy did not come up on {port}"}, True)
     return proxy.serve(cfg, port)
+
+
+def cmd_verify_desktop(args) -> int:
+    """Compatibility command that explains the measured Desktop limitation."""
+    return _emit({
+        "ok": False,
+        "supported": False,
+        "desktopSeen": False,
+        "reason": "personal Claude Desktop manages ANTHROPIC_BASE_URL and rejects an override",
+        "available": "Governor hooks, ledger, Codex, Local, Oracle, and OpenRouter workers",
+        "proxyScope": "terminal Claude Code only",
+    }, True)
 
 
 def cmd_hook(args) -> int:
@@ -795,6 +939,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("cc_task_id")
     s.add_argument("--work-order", default="")
     s.add_argument("--lane", default=None, help="which lane it occupies (station/oracle)")
+    s.add_argument("--attempt", type=int, help="reservation id returned by dispatch/fill")
+
+    s = add("release", cmd_release, help="release an unsubmitted worker reservation")
+    s.add_argument("id")
+
+    s = add("cancel", cmd_cancel, help="cancel or release an active worker attempt")
+    s.add_argument("id")
+
+    add("recover-handoffs", cmd_recover_handoffs,
+        help="recover external jobs whose reservation was not attached")
 
     s = add("fallback", cmd_fallback, help="supersede a failed task with a clean retry")
     s.add_argument("id")
@@ -804,10 +958,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add("integrate", cmd_integrate, help="mark reviewed work integrated")
     s.add_argument("id")
-    s.add_argument("--cleanup", action="store_true", help="remove the codex worktree")
-    s.add_argument("--discard", action="store_true",
-                   help="with --cleanup, also delete a branch that is not merged (destructive)")
-    s.add_argument("--force", action="store_true")
+    s.add_argument("--cleanup", action="store_true", help="remove verified worker worktrees")
+    s.add_argument("--accept-equivalent", action="store_true",
+                   help="accept a reviewed squash/manual copy that patch-id cannot prove")
+    s.add_argument("--note", default="", help="required reason for --accept-equivalent")
+    s.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
 
     s = add("override", cmd_override, help="force supervisor or worker")
     s.add_argument("what", choices=["supervisor", "worker"])
@@ -826,11 +981,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("target", choices=["codex", "claude"])
 
     s = add("launch", cmd_launch,
-            help="lifecycle-supervised claude: relaunches across backend switches")
+            help="launch stock Claude through the request-boundary router")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--force", action="store_true",
-                   help="start on Anthropic even when the supervisor says LOCAL "
-                        "and LM Studio is unusable")
+                   help="deprecated compatibility flag; routing overrides use `dg override`")
     s.add_argument("claude_args", nargs=argparse.REMAINDER)
 
     s = add("ccdelegate", cmd_ccdelegate,
@@ -849,13 +1003,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max", type=int, default=0, help="cap how many to start")
 
     s = add("proxy", cmd_proxy,
-            help="router proxy: per-request failover, works inside Claude Desktop")
+            help="terminal Claude Code router: per-request supervisor failover")
     s.add_argument("--port", type=int)
     s.add_argument("--status", action="store_true")
     s.add_argument("--start", action="store_true",
                    help="start it in the background and wait until it answers")
     s.add_argument("--stop", action="store_true")
     s.add_argument("--force", action="store_true", help="start even if one seems to be running")
+
+    add("verify-desktop", cmd_verify_desktop,
+        help="explain why personal Claude Desktop cannot use the router")
 
     s = add("hook", cmd_hook, help="Claude Code integration points (used by settings.json)")
     s.add_argument("name", choices=["statusline", "prompt", "stopfailure", "session"])

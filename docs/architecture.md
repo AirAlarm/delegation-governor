@@ -33,7 +33,7 @@ Everything below was queried, not assumed.
 | LM Studio | on **this machine**, `127.0.0.1:1234`, loopback-bound |
 | CCR | not installed |
 
-## ADR 1: no router. LM Studio already speaks Anthropic
+## ADR 1: route, do not translate
 
 The brief assumed a Claude Code Router was needed to reach LM Studio.
 
@@ -44,8 +44,9 @@ POST http://127.0.0.1:1234/v1/messages  ->  200, {"type":"message", "content":[.
                                                   "usage":{"input_tokens":68,...}}
 ```
 
-So no translation layer is required, and CCR is not installed. That removes a
-dependency, a process, a config file and a protocol-compatibility surface.
+So no translation layer is required, and CCR is not installed. The Governor's
+small loopback router only selects an upstream, rewrites the configured model,
+and protects credentials; it does not convert protocols.
 
 `dg doctor` verifies the endpoint at zero inference cost by posting an invalid
 body and checking for an Anthropic-shaped `invalid_request_error` - LM Studio
@@ -59,55 +60,35 @@ which is a bad trade for information a GET already carries. It stays in
 `dg doctor`, where it runs once on request and the question it answers is the
 actual point.
 
-**Rejected:** CCR (unnecessary hop), LiteLLM in Anthropic mode (heavy
-dependency for a translation that is not needed), a hand-written proxy
-(a protocol to maintain forever).
+**Rejected:** CCR and LiteLLM in Anthropic mode (translation layers that are
+not needed).
 
-## ADR 2: supervisor failover is a process lifecycle, not a runtime switch
+## ADR 2: one stable client endpoint, request-boundary failover
 
-Claude Code constructs its client from `process.env` at startup:
-
-```js
-new PA({ baseURL: env("ANTHROPIC_BASE_URL"), authToken: env("ANTHROPIC_AUTH_TOKEN") })
-```
-
-The backend is therefore **fixed for the life of the process**. Nothing can
-switch it mid-session. Since the endpoint problem is already solved (ADR 1),
-what remains is deciding *when to start a process against which base URL* -
-a lifecycle problem. `dg launch` is that lifecycle supervisor.
+Claude Code constructs its client from `ANTHROPIC_BASE_URL` at startup. It is
+therefore pointed at one stable loopback URL for its lifetime:
 
 ```
-dg launch
-  -> claude --session-id <uuid> --model sonnet            (Anthropic)
-  -> user works; StopFailure(rate_limit) records LOCAL
-  -> claude exits (natural boundary)
-  -> claude --resume <uuid> --model openai/gpt-oss-20b     (LM Studio)
-  -> reset passes, probe confirms Anthropic
-  -> claude --resume <uuid> --model sonnet                (Anthropic)
+Claude Code -> 127.0.0.1:8787 -> Anthropic
+                               -> local Qwen
+                               -> Oracle
 ```
 
-**The safe synchronization boundary is Claude Code's own exit.** The Governor
-never signals, interrupts or kills it: doing so could tear a session apart
-mid-tool-call, mid-write or mid-git-operation. A hard rate limit does not kill
-the session either - the hook records the state and tells the user; the switch
-happens on the next natural exit. A relaunch therefore cannot land in the
-middle of a side effect.
+The router never changes upstream after response bytes have been sent. It may
+buffer an error response, however, and transparently try the next tier. This is
+especially important for Qwen's structured
+`Failed to generate a valid tool call` failure: Oracle receives the same
+request before Claude sees the failed response.
 
-Session continuity: the first launch pins `--session-id`, so the id is known
-without scraping anything, and every relaunch uses `--resume`. `--model` is
-passed explicitly on **every** launch, because a resumed session otherwise
-restores the model it was saved with - which after a switch would be an
-Anthropic model name pointed at LM Studio, or the reverse.
+`dg launch` is deliberately thin: it starts the router if needed, adds the
+`/client/launch` identity prefix, and launches stock Claude once. Terminal
+Claude installed with `dg install --proxy` uses `/client/cli`. These identities
+make terminal routing observable without changing the Anthropic API path
+forwarded upstream.
 
-Restart-loop protection: a relaunch that exits within 20s is a strike; three
-strikes stop the loop, with backoff between attempts and a bounded restart
-budget. `dg launch` also refuses to start against an unreachable LM Studio and
-prints the recovery path instead.
-
-**Rejected:** killing Claude Code on the hook (unsafe boundary); a local
-reverse proxy that swaps upstreams mid-stream (a custom proxy to avoid a
-process restart - more moving parts, and mid-request switching is exactly
-where correctness gets hard).
+The Claude banner can continue to say “Sonnet 4.6.” It describes the model the
+client selected, not which upstream actually served the request. The router's
+health snapshot is authoritative.
 
 ## ADR 2b: the LOCAL route has two hard prerequisites
 
@@ -123,16 +104,13 @@ exceed_context_size_error: request (33684 tokens) exceeds the available
 context size (26112 tokens)
 ```
 
-So `dg launch` treats residency as part of switching to LOCAL: it reads
-`/api/v0/models` for the model's state and `loaded_context_length`, and runs
-`lms load <model> -c <contextLength>` when that is missing or too small,
-capped at the model's own maximum. `minContextLength` defaults to 40960 --
-comfortably above the measured 34k, low enough to allow a modest box.
+The LM Studio probe reads `/api/v0/models` for residency and context. Loading
+is attempted only when the tier is actually selected, never during ordinary
+lane inspection.
 
-**Model size.** The default supervisor model is `openai/gpt-oss-20b`, not the
-larger `qwen/qwen3.6-35b-a3b`. The 35B's weights alone are 22GB, and LM Studio's
-memory guardrails refuse to load it at any useful context on this machine;
-the 20B is 12GB and loads at the full 131072. Both are configurable.
+**Model size.** The current default is `qwen/qwen3.5-9b` at 65536 context,
+matching the station profile so supervisor and Station do not force a model
+swap. The choice remains configurable.
 
 **One model slot.** LM Studio holds a single model resident. A LOCAL
 supervisor and a cc-delegate `station-*` profile therefore evict each other --
@@ -142,10 +120,11 @@ detect the shared endpoint and warn; the Governor does not try to serialise
 another tool's worker. While the supervisor is LOCAL, delegate to Codex or an
 `oracle-*` profile.
 
-## ADR 2c: two fallback tiers, tried in order
+## ADR 2c: two fallback tiers, tried independently in order
 
-`supervisorFallbacks` is an ordered list; `dg launch` takes the first that
-answers a zero-inference probe.
+`supervisorFallbacks` is an ordered list; the router tries each usable tier at
+the request boundary. A cooldown prevents a failed endpoint being rediscovered
+on every request.
 
 | Tier | Strength | Weakness |
 |---|---|---|
@@ -162,17 +141,19 @@ Verified live: the gateway answers `/v1/messages` in Anthropic format with model
 the cc-delegate config). Its key is read from `ORACLE_LLM_API_KEY`, falling back
 to the key cc-delegate already stores, rather than asking for a second copy.
 
-**OpenRouter was considered and rejected.** It serves only the OpenAI chat
-format, so using it as a supervisor would reintroduce the translation layer
-ADR 1 removed - and it is metered billing, which inverts the project's goal of
-spending less. As a *worker* it needs no Governor change at all: cc-delegate
-already speaks that format, so it belongs there as a profile if it is wanted.
+OpenRouter is deliberately a **worker-only fourth lane**. It now supports both
+OpenAI-compatible calls and an Anthropic Messages endpoint, but placing it in
+`supervisorFallbacks` would silently turn supervisor traffic into metered API
+usage. The worker lane instead uses the explicit `openrouter-coder`
+cc-delegate profile and an independent capacity reservation. Its availability
+probe calls `/api/v1/key`, not a model, so health and remaining key limit cost
+no inference tokens.
 
-## ADR 2d: a router proxy, because Desktop cannot be relaunched
+## ADR 2d: personal Desktop cannot use the request router
 
-ADR 2 rejected a reverse proxy on the grounds that a process relaunch was
-simpler. That holds for terminal sessions. It does not hold for Claude Desktop,
-and measurement decided it:
+Desktop bundles its own Claude process, so it cannot be wrapped by
+`dg launch`. Measurement also showed that Desktop supplies its own base URL and
+does not honor the terminal/user environment override reliably.
 
 * Desktop bundles its own `claude.exe` and spawns sessions as children, so
   nothing external can wrap or relaunch it;
@@ -180,13 +161,11 @@ and measurement decided it:
   across many turns), the `UserPromptSubmit` payload carries no `rate_limits`,
   and transcripts hold no quota telemetry either.
 
-So in Desktop the supervisor was both blind and unable to act. `dg proxy` fixes
-both at once.
-
-```
-Claude Code --> 127.0.0.1:8787 --> api.anthropic.com   (normal)
-                              \-> LM Studio / Oracle    (quota exhausted)
-```
+Personal Claude Desktop reports `ANTHROPIC_BASE_URL` as managed and rejects a
+Local-environment override. Therefore Desktop uses the Governor's hooks,
+ledger, Codex plugin, and cc-delegate workers, but not this proxy. The proxy is
+supported only for terminal Claude Code; enterprise-managed gateway modes are
+outside this project's tested scope.
 
 It is a **router, not a translator**: every backend already speaks the
 Anthropic Messages API, so requests are forwarded, not converted. The switch is
@@ -202,15 +181,14 @@ Two findings made this viable:
   header through **verbatim and unread**; a fallback tier gets its own key
   instead, so the subscription token never leaves the machine except to
   Anthropic.
-* **Anthropic returns quota on every response**
-  (`anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}`). Harvesting it in
-  the proxy restores SAVE mode in Desktop at zero cost.
+* **Anthropic returns quota on terminal proxy responses**
+  (`anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}`). Harvesting it
+  restores SAVE mode for routed terminal sessions at zero inference cost.
 
-Wiring it on is opt-in (`dg install --proxy`) because it sets a *persistent
-user* `ANTHROPIC_BASE_URL` -- the only channel Desktop inherits. The trade is
-explicit: Claude Code then depends on the proxy being up, so a `SessionStart`
-hook starts it on demand, `dg doctor` fails loudly if the variable points at a
-dead port, and `dg uninstall` removes the variable again.
+Wiring terminal Claude is opt-in (`dg install --proxy`) because it sets a
+persistent user and settings URL. A managed Python runtime, an ONLOGON task,
+and the SessionStart hook keep the proxy available. `dg uninstall` restores the
+previous terminal endpoint. Desktop continues to use worker delegation only.
 
 ## ADR 2e: lanes are machines, and tasks are classified
 
@@ -227,6 +205,7 @@ Now capacity is keyed by the resource that is actually scarce:
 | `codex` | cloud | 1 |
 | `station` | GPU box, one resident model | 1 |
 | `oracle` | CPU VM | 2 |
+| `openrouter` | metered cloud API | 1 |
 
 and tasks carry a class (`tiny/simple/standard/hard`) that selects a lane
 preference before availability is considered. Claude sets the class when
@@ -236,15 +215,15 @@ path counts would be exactly the kind of cleverness v1 avoids.
 The `station` lane is excluded automatically while the supervisor is running on
 that box, which is the contention that failed a real delegated task earlier.
 
-`dg fill` starts one READY task in every free lane. Proven live: `hard -> codex`
-(pid 26384) and `simple -> station` (gpt-oss-20b) running at the same moment,
-with `oracle` still free.
+`dg fill` reserves one READY task in every free lane in one pass. Codex starts
+through the official plugin immediately; Station, Oracle, and OpenRouter return
+independent MCP handoffs that should be submitted without waiting for another
+lane. The per-repository write cap is four so all four can be active when their
+owned paths do not overlap.
 
-Schema v2 adds `tasks.task_class` and `attempts.lane`; both are additive and a
-v1 ledger migrates in place. The config schema is versioned too -- a v1 config
-is retired to a timestamped copy rather than merged, because merging its
-tool-keyed capacity over the lane model would silently cap concurrency at the
-old numbers.
+Schema v4 adds the OpenRouter lane and extends old routing tables and default
+capacity without discarding user ordering. Migrations are additive and preserve
+user configuration, writing a timestamped backup first.
 
 ## ADR 3: SQLite for state
 
@@ -278,13 +257,11 @@ and both stay visible. Failed attempts are never hidden.
 Partial output from a failed attempt is preserved on disk for diagnosis, and
 never reused: `dg fallback` starts a fresh task from the original clean base.
 
-Cleanup is likewise non-destructive, after live testing showed it was not:
-`integrate --cleanup` originally removed the worktree and force-deleted the
-branch while the worker's output was still *uncommitted*, destroying the only
-copy - a later task branched from HEAD then failed because the change had
-vanished. Cleanup now commits loose output to the branch first and keeps any
-branch not already reachable from HEAD, saying so; `--discard` is the explicit
-opt-in to throw it away.
+Integration is now evidence-based. `dg integrate` snapshots loose worker output
+and refuses to mark a WRITE task `INTEGRATED` until the branch is reachable
+from HEAD or every worker patch id is present after a cherry-pick. An unusual
+reviewed squash/manual copy requires `--accept-equivalent --note`. Cleanup runs
+only after that proof, so it cannot delete the sole copy of unintegrated work.
 
 ## ADR 6: quota inspection costs zero inference
 
@@ -323,7 +300,26 @@ they validated the bug instead of catching it -- it took a real response header
 to expose.
 Absence is normal before the first API response and never reads as 0%.
 
-## ADR 7: cc-delegate is read, never driven
+## ADR 7: Codex is driven through the official Claude plugin
+
+The Codex lane launches `codex@openai-codex`'s
+`codex-companion.mjs task --background --fresh --json` transport. The Governor
+creates the isolated worktree and bounded prompt; the plugin owns the Codex
+thread, process lifecycle, log, cancellation, and durable result. The same job
+is visible to `/codex:status`.
+
+Governor-launched companion jobs receive a stable `CLAUDE_PLUGIN_DATA` under
+the Governor state directory. Reconciliation also recognizes the plugin's
+older Claude-data and OS-temp layouts so jobs survive an upgrade between
+layouts. The prompt carries a task/attempt marker, allowing
+`dg recover-handoffs` to reconnect a job when launch succeeded but its
+acknowledgement was lost.
+
+There is no automatic `codex exec` substitute. If the official plugin is
+missing, disabled, incompatible, or cannot authenticate, the Codex lane is
+reported down and other configured lanes remain independently usable.
+
+## ADR 7b: cc-delegate is read, never driven
 
 cc-delegate is an MCP server, so only Claude can call `run_dev_task`. Rather
 than shell out or reimplement it, the Governor reads the job files it already

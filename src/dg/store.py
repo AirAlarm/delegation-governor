@@ -12,11 +12,12 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from typing import Any, Iterable
 
 from . import config
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # READY and BLOCKED are never stored: they are derived from PLANNED + the
 # dependency graph, so the ledger cannot go stale against its own edges.
@@ -24,9 +25,10 @@ STORED_STATUSES = {
     "PLANNED", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED",
     "QUOTA_FAILED", "AUTH_FAILED", "SUPERSEDED", "CANCELLED", "INTEGRATED",
 }
-TERMINAL_OK = {"SUCCEEDED", "INTEGRATED"}
+TERMINAL_OK = {"INTEGRATED"}
 TERMINAL_BAD = {"FAILED", "QUOTA_FAILED", "AUTH_FAILED", "CANCELLED"}
 ACTIVE = {"QUEUED", "RUNNING"}
+ATTEMPT_ACTIVE = {"RESERVED", "QUEUED", "RUNNING"}
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -49,6 +51,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at REAL NOT NULL,
     result_location TEXT,
     failure_reason TEXT
+    ,retry_of TEXT
+    ,superseded_by TEXT
 );
 CREATE TABLE IF NOT EXISTS attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,15 +69,30 @@ CREATE TABLE IF NOT EXISTS attempts (
     started_at REAL NOT NULL,
     ended_at REAL,
     last_checked_at REAL
+    ,profile TEXT
+    ,transport TEXT
+    ,external_job_id TEXT
+    ,reserved_at REAL
 );
 CREATE INDEX IF NOT EXISTS attempts_task ON attempts(task_id);
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);
 """
 
 
+class Connection(sqlite3.Connection):
+    """Compatibility guard for callers that predate ``store.session``."""
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 def connect() -> sqlite3.Connection:
     config.ensure_home()
-    con = sqlite3.connect(config.DB_PATH, timeout=15, isolation_level=None)
+    con = sqlite3.connect(config.DB_PATH, timeout=15, isolation_level=None,
+                          factory=Connection)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=15000")
@@ -85,6 +104,16 @@ def connect() -> sqlite3.Connection:
         con.close()  # don't leak the handle when the db is unusable
         raise
     return con
+
+
+@contextmanager
+def session():
+    """A short-lived connection that is always closed by the caller."""
+    con = connect()
+    try:
+        yield con
+    finally:
+        con.close()
 
 
 def _migrate(con: sqlite3.Connection) -> None:
@@ -116,6 +145,14 @@ def _upgrade(con: sqlite3.Connection, have: int) -> None:
     acols = {r["name"] for r in con.execute("PRAGMA table_info(attempts)")}
     if have < 2 and "lane" not in acols:
         con.execute("ALTER TABLE attempts ADD COLUMN lane TEXT")
+    if have < 3:
+        for name, ddl in (("retry_of", "TEXT"), ("superseded_by", "TEXT")):
+            if name not in cols:
+                con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
+        for name, ddl in (("profile", "TEXT"), ("transport", "TEXT"),
+                          ("external_job_id", "TEXT"), ("reserved_at", "REAL")):
+            if name not in acols:
+                con.execute(f"ALTER TABLE attempts ADD COLUMN {name} {ddl}")
 
 
 # ---------------------------------------------------------------- kv state
@@ -177,6 +214,7 @@ def create_task(
     priority: int = 0,
     base_commit: str | None = None,
     task_class: str = "standard",
+    retry_of: str | None = None,
 ) -> str:
     mode = mode.upper()
     if mode not in ("READ_ONLY", "WRITE"):
@@ -190,11 +228,11 @@ def create_task(
         tid = next_id(con)
         con.execute(
             "INSERT INTO tasks(id,title,mode,status,goal,repo,base_commit,paths,depends_on,"
-            "owner,priority,task_class,created_at,updated_at)"
-            " VALUES(?,?,?,'PLANNED',?,?,?,?,?,?,?,?,?,?)",
+            "owner,priority,task_class,created_at,updated_at,retry_of)"
+            " VALUES(?,?,?,'PLANNED',?,?,?,?,?,?,?,?,?,?,?)",
             (tid, title, mode, goal, os.path.abspath(repo) if repo else "", base_commit,
              json.dumps(list(paths)), json.dumps(deps), owner, priority, task_class,
-             now, now),
+             now, now, retry_of),
         )
     return tid
 
@@ -210,6 +248,8 @@ def _task_row(row: sqlite3.Row) -> dict[str, Any]:
     d["updatedAt"] = d.pop("updated_at")
     d["sessionId"] = d.pop("session_id")
     d["taskClass"] = d.pop("task_class", "standard")
+    d["retryOf"] = d.pop("retry_of", None)
+    d["supersededBy"] = d.pop("superseded_by", None)
     return d
 
 
@@ -242,6 +282,43 @@ def set_depends_on(con: sqlite3.Connection, tid: str, deps: Iterable[str]) -> No
                 (json.dumps(list(deps)), time.time(), tid))
 
 
+def create_fallback(con: sqlite3.Connection, original: dict[str, Any]) -> str:
+    """Create a clean retry and rewire its live dependants atomically."""
+    now = time.time()
+    with transaction(con):
+        current = con.execute("SELECT status FROM tasks WHERE id=?",
+                              (original["id"],)).fetchone()
+        if current is None or current["status"] not in (
+                "QUOTA_FAILED", "AUTH_FAILED", "FAILED"):
+            raise ValueError(f"{original['id']} is not eligible for fallback")
+        new = next_id(con)
+        con.execute(
+            "INSERT INTO tasks(id,title,mode,status,goal,repo,base_commit,paths,depends_on,"
+            "owner,priority,task_class,created_at,updated_at,retry_of) "
+            "VALUES(?,?,?,'PLANNED',?,?,?,?,?,?,?,?,?,?,?)",
+            (new, original["title"], original["mode"], original["goal"], original["repo"],
+             original["baseCommit"], json.dumps(original["paths"]),
+             json.dumps(original["dependsOn"]), original["owner"],
+             int(original["priority"]) + 1, original["taskClass"], now, now,
+             original["id"]),
+        )
+        terminal = TERMINAL_OK | TERMINAL_BAD | {"SUPERSEDED"}
+        for row in con.execute("SELECT id,status,depends_on FROM tasks").fetchall():
+            if row["status"] in terminal:
+                continue
+            deps = json.loads(row["depends_on"])
+            if original["id"] in deps:
+                deps = [new if d == original["id"] else d for d in deps]
+                con.execute("UPDATE tasks SET depends_on=?,updated_at=? WHERE id=?",
+                            (json.dumps(deps), now, row["id"]))
+        con.execute(
+            "UPDATE tasks SET status='SUPERSEDED',superseded_by=?,failure_reason=?,"
+            "updated_at=? WHERE id=?",
+            (new, f"{current['status']}; superseded by {new}", now, original["id"]),
+        )
+    return new
+
+
 def blocks_map(tasks: list[dict[str, Any]]) -> dict[str, list[str]]:
     """Reverse dependency edges -- who each task unblocks."""
     out: dict[str, list[str]] = {t["id"]: [] for t in tasks}
@@ -269,6 +346,107 @@ def release(con: sqlite3.Connection, tid: str) -> None:
     con.execute(
         "UPDATE tasks SET status='PLANNED', session_id=NULL, updated_at=? "
         "WHERE id=? AND status='QUEUED'", (time.time(), tid))
+
+
+def reserve_attempt(
+    con: sqlite3.Connection, tid: str, session_id: str, worker: str, lane: str,
+    cfg: dict, profile: str | None = None, transport: str | None = None,
+) -> dict[str, Any]:
+    """Atomically claim a task and reserve one independent execution lane.
+
+    Capacity and path ownership are checked under the same write lock as the
+    reservation. This allows Codex, Station, Oracle, and OpenRouter to run in
+    parallel while preventing two Claude sessions from racing into one slot.
+    """
+    from . import scheduler
+
+    now = time.time()
+    with transaction(con):
+        row = con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        if row is None:
+            return {"ok": False, "reason": "task not found"}
+        task = _task_row(row)
+        if task["status"] != "PLANNED":
+            return {"ok": False, "reason": f"task is {task['status']}"}
+
+        active_rows = con.execute(
+            "SELECT a.lane,a.status,t.id AS task_id,t.mode,t.repo,t.paths "
+            "FROM attempts a JOIN tasks t ON t.id=a.task_id "
+            "WHERE a.status IN ('RESERVED','QUEUED','RUNNING')"
+        ).fetchall()
+        if task["mode"] == "READ_ONLY":
+            used = sum(1 for a in active_rows if a["mode"] == "READ_ONLY")
+            limit = int(cfg["workers"]["maxReadOnlyJobs"])
+            if used >= limit:
+                return {"ok": False, "reason": f"read-only capacity {used}/{limit}"}
+        else:
+            repo = task["repo"]
+            same_repo = [a for a in active_rows
+                         if a["mode"] == "WRITE" and a["repo"] == repo]
+            total_limit = int(cfg["workers"]["totalWriteJobsPerRepo"])
+            if len(same_repo) >= total_limit:
+                return {"ok": False,
+                        "reason": f"write capacity {len(same_repo)}/{total_limit} in repo"}
+            lane_limit = int(cfg["workers"]["lanes"][lane].get("maxWriteJobs", 1))
+            lane_used = sum(1 for a in same_repo if a["lane"] == lane)
+            if lane_used >= lane_limit:
+                return {"ok": False, "reason": f"{lane} capacity {lane_used}/{lane_limit}"}
+            for other in same_repo:
+                if scheduler.paths_overlap(task["paths"], json.loads(other["paths"])):
+                    return {"ok": False,
+                            "reason": f"path conflict with {other['task_id']}"}
+
+        cur = con.execute(
+            "INSERT INTO attempts(task_id,worker,lane,status,started_at,reserved_at,"
+            "profile,transport) VALUES(?,?,?,'RESERVED',?,?,?,?)",
+            (tid, worker, lane, now, now, profile, transport),
+        )
+        attempt_id = int(cur.lastrowid)
+        con.execute(
+            "UPDATE tasks SET status='QUEUED',session_id=?,owner=?,updated_at=? WHERE id=?",
+            (session_id, worker, now, tid),
+        )
+    return {"ok": True, "attemptId": attempt_id}
+
+
+def activate_attempt(
+    con: sqlite3.Connection, attempt_id: int, handle: str,
+    *, worktree: str | None = None, branch: str | None = None,
+    log_path: str | None = None, external_job_id: str | None = None,
+) -> bool:
+    """Turn a durable reservation into a running external job."""
+    with transaction(con):
+        row = con.execute(
+            "SELECT task_id,status FROM attempts WHERE id=?", (attempt_id,)
+        ).fetchone()
+        if row is None or row["status"] != "RESERVED":
+            return False
+        con.execute(
+            "UPDATE attempts SET status='RUNNING',handle=?,worktree=?,branch=?,log_path=?,"
+            "external_job_id=?,started_at=?,last_checked_at=? WHERE id=?",
+            (handle, worktree, branch, log_path, external_job_id,
+             time.time(), time.time(), attempt_id),
+        )
+        con.execute("UPDATE tasks SET status='RUNNING',updated_at=? WHERE id=?",
+                    (time.time(), row["task_id"]))
+    return True
+
+
+def release_reservation(con: sqlite3.Connection, tid: str) -> bool:
+    """Cancel a not-yet-attached reservation and return its task to PLANNED."""
+    with transaction(con):
+        row = con.execute(
+            "SELECT id FROM attempts WHERE task_id=? AND status='RESERVED' "
+            "ORDER BY id DESC LIMIT 1", (tid,)
+        ).fetchone()
+        if row is None:
+            return False
+        now = time.time()
+        con.execute("UPDATE attempts SET status='CANCELLED',ended_at=? WHERE id=?",
+                    (now, row["id"]))
+        con.execute("UPDATE tasks SET status='PLANNED',session_id=NULL,updated_at=? WHERE id=?",
+                    (now, tid))
+    return True
 
 
 # ---------------------------------------------------------------- attempts
@@ -305,7 +483,8 @@ def attempts_for(con: sqlite3.Connection, task_id: str) -> list[dict[str, Any]]:
 
 def live_attempt(con: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
     row = con.execute(
-        "SELECT * FROM attempts WHERE task_id=? AND status='RUNNING' ORDER BY id DESC LIMIT 1",
+        "SELECT * FROM attempts WHERE task_id=? AND status IN ('RESERVED','QUEUED','RUNNING') "
+        "ORDER BY id DESC LIMIT 1",
         (task_id,)).fetchone()
     return dict(row) if row else None
 
@@ -313,7 +492,15 @@ def live_attempt(con: sqlite3.Connection, task_id: str) -> dict[str, Any] | None
 def running_attempts(con: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(r) for r in con.execute(
         "SELECT a.*, t.repo AS repo, t.mode AS task_mode FROM attempts a"
-        " JOIN tasks t ON t.id=a.task_id WHERE a.status='RUNNING' ORDER BY a.id").fetchall()]
+        " JOIN tasks t ON t.id=a.task_id "
+        "WHERE a.status IN ('RESERVED','QUEUED','RUNNING') ORDER BY a.id").fetchall()]
+
+
+def reserved_attempts(con: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [dict(r) for r in con.execute(
+        "SELECT a.*,t.repo AS repo,t.mode AS task_mode FROM attempts a "
+        "JOIN tasks t ON t.id=a.task_id WHERE a.status='RESERVED' ORDER BY a.id"
+    ).fetchall()]
 
 
 def touch_attempt(con: sqlite3.Connection, attempt_id: int) -> None:

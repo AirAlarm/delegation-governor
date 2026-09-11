@@ -1,37 +1,10 @@
-"""`dg launch` -- lifecycle supervisor around stock Claude Code.
+"""`dg launch` -- a thin stock-Claude wrapper around the request router.
 
-Why a supervisor and not a router
----------------------------------
-Claude Code builds its Anthropic client from `process.env` (verified in 2.1.116:
-`new PA({baseURL: env("ANTHROPIC_BASE_URL"), authToken: env("ANTHROPIC_AUTH_TOKEN")})`).
-The backend is therefore fixed for the life of the process -- nothing can switch
-it mid-session. Since both fallback backends already serve the Anthropic
-Messages API natively, the only missing piece is *when* to start a process
-against which base URL. That is a process lifecycle problem, so the answer is a
-lifecycle supervisor, not a reverse proxy.
-
-Tiers
------
-Anthropic first, then each entry of `supervisorFallbacks` in order until one
-answers: the GPU box (fast, one model slot, only up when the PC is) and then
-the always-on Oracle VM (slow CPU ARM, but independent of both).
-
-The safe synchronization boundary
----------------------------------
-We never signal, interrupt or kill Claude Code -- doing so could tear a session
-in half mid-tool-call, mid-write, mid-git-operation. The boundary is Claude
-Code's own exit: by then every tool call has finished and the transcript is
-flushed. A hard rate limit does not kill the session either; the StopFailure
-hook records the state and tells the user, and the switch happens on the next
-natural exit. So a relaunch can never land in the middle of a side effect.
-
-Session continuity
-------------------
-The first launch pins `--session-id <uuid>`, so we always know the id without
-scraping anything. Every relaunch uses `--resume <uuid>`, which reloads the same
-transcript. `--model` is passed explicitly on every launch, because a resumed
-session otherwise restores the model it was saved with -- which would be an
-Anthropic model name talking to a local endpoint, or the reverse.
+The child process keeps one stable local base URL for its entire lifetime. The
+router chooses Anthropic, Qwen, or Oracle independently for every request, so a
+quota transition never requires terminating or resuming Claude Code. The
+legacy lifecycle helpers below remain for configuration probes and backwards
+compatibility; :func:`run` is intentionally a single-launch boundary.
 """
 from __future__ import annotations
 
@@ -140,6 +113,9 @@ def probe_tier(t: dict, load: bool = False) -> tuple[bool, str]:
         return True, (f"{t['name']}: {t['baseUrl']} reachable, {t['model']} {state}"
                       + ("" if state == "loaded" else " (loads on demand)"))
 
+    if t.get("kind") == "openrouter":
+        return _probe_openrouter(t)
+
     import urllib.error
     import urllib.request
     url = t["baseUrl"].rstrip("/") + "/v1/messages"
@@ -162,6 +138,32 @@ def probe_tier(t: dict, load: bool = False) -> tuple[bool, str]:
     if not (body.get("type") == "error" or "error" in body):
         return False, f"{t['name']}: not an Anthropic Messages endpoint ({str(body)[:100]})"
     return True, f"{t['name']}: {t['baseUrl']} ready ({t['model']})"
+
+
+def _probe_openrouter(t: dict) -> tuple[bool, str]:
+    """Validate an OpenRouter key without spending an inference request."""
+    import urllib.error
+    import urllib.request
+    token = tier_token(t)
+    if not token:
+        return False, f"{t['name']}: set {t.get('tokenEnvVar', 'OPENROUTER_API_KEY')}"
+    url = t["baseUrl"].rstrip("/") + "/v1/key"
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=t.get("probeTimeoutSeconds", 8)) as r:
+            data = json.loads(r.read()).get("data") or {}
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, f"{t['name']}: API key rejected ({e.code})"
+        return False, f"{t['name']}: HTTP {e.code} checking API key"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return False, f"{t['name']}: {t['baseUrl']} unreachable ({type(e).__name__})"
+    remaining = data.get("limit_remaining")
+    if remaining is not None and float(remaining) <= 0:
+        return False, f"{t['name']}: API key spending limit exhausted"
+    suffix = f", ${float(remaining):.2f} key limit remaining" if remaining is not None else ""
+    return True, f"{t['name']}: API key ready{suffix}"
 
 
 def first_usable_tier(cfg: dict, load: bool = False) -> tuple[dict | None, list[str]]:
@@ -366,86 +368,33 @@ def _no_tier_help(cfg: dict, why: list[str]) -> str:
 
 def run(cfg: dict, claude_args: list[str], dry_run: bool = False,
         force: bool = False, max_restarts: int = 20) -> int:
-    con = store.connect()
+    """Launch stock Claude through the authoritative request router.
+
+    Routing no longer requires terminating and resuming Claude sessions: the
+    proxy can switch upstreams safely at the request boundary.
+    """
     claude = shutil.which("claude")
     if not claude:
         print("dg launch: claude not on PATH", file=sys.stderr)
         return 1
-
     session_id = os.environ.get("DG_SESSION_ID") or str(uuid.uuid4())
-    decision = decide_route(con, cfg)
-    route = decision["route"]
-    first, strikes, restarts = True, 0, 0
-    forced_anthropic = False
-
-    while True:
-        chosen = None
-        if route == LOCAL:
-            chosen, why = first_usable_tier(cfg, load=True)
-            if chosen is None:
-                # Clear recovery path beats a restart loop into a dead endpoint.
-                print(_no_tier_help(cfg, why), file=sys.stderr)
-                if not force:
-                    return 2
-                route, forced_anthropic = ANTHROPIC, True
-                decision = {"route": ANTHROPIC, "reason": "forced past unusable fallbacks"}
-            else:
-                for skipped in why:
-                    print(f"dg launch: skipping {skipped}", file=sys.stderr)
-                if chosen.get("kind") == "lmstudio" and (warn := local_contention(cfg)):
-                    print(f"dg launch: warning: {warn}", file=sys.stderr)
-
-        env, model = env_for(route, cfg, chosen=chosen)
-        argv = build_argv(claude, route, model, session_id, first, claude_args)
-        label = ANTHROPIC if route == ANTHROPIC else (chosen or {}).get("name", route)
-        store.kv_set(con, "launcher", {
-            "sessionId": session_id, "route": route, "tier": label, "model": model,
-            "since": time.time(), "restarts": restarts})
-        print(f"dg launch: route={label} model={model} session={session_id} "
-              f"({decision['reason']})", file=sys.stderr)
-        if dry_run:
-            print(" ".join(argv), file=sys.stderr)
-            return 0
-
-        started = time.time()
-        rc = subprocess.call(argv, env=env)
-        uptime = time.time() - started
-        first = False
-
-        # Claude Code has exited: every tool call is finished and the
-        # transcript is flushed. This is the only point we ever switch at.
-        after = decide_route(con, cfg)
-        if after["route"] == route:
-            return rc  # the user quit; nothing to switch to
-        if after["route"] == LOCAL:
-            if forced_anthropic:
-                # We were forced onto Anthropic past dead fallbacks and the
-                # user has now quit; honour the quit rather than bouncing back.
-                return rc
-            # Never relaunch into a backend that is not answering: that is the
-            # restart loop this design exists to avoid.
-            probe, why = first_usable_tier(cfg)
-            if probe is None:
-                print(_no_tier_help(cfg, why), file=sys.stderr)
-                return rc or 2
-
-        strikes = strikes + 1 if uptime < MIN_HEALTHY_UPTIME else 0
-        if strikes >= MAX_STRIKES:
-            print(f"dg launch: {strikes} sessions exited within {MIN_HEALTHY_UPTIME:.0f}s while "
-                  f"switching {route} -> {after['route']}; stopping instead of restart-looping.\n"
-                  f"  Run `dg doctor` and `dg status`, then relaunch when the cause is fixed.",
-                  file=sys.stderr)
-            return rc or 3
-        restarts += 1
-        if restarts > max_restarts:
-            print(f"dg launch: restart budget ({max_restarts}) exhausted; stopping.",
-                  file=sys.stderr)
-            return rc or 3
-
-        delay = BACKOFF[min(strikes, len(BACKOFF) - 1)] if strikes else 0.0
-        print(f"dg launch: supervisor moved {route} -> {after['route']} "
-              f"({after['reason']}); resuming session {session_id}"
-              + (f" after {delay:.0f}s" if delay else ""), file=sys.stderr)
-        if delay:
-            time.sleep(delay)
-        route, decision = after["route"], after
+    from . import hooks, proxy
+    port = cfg.get("proxy", {}).get("port", 8787)
+    if not proxy.health(port):
+        hooks._spawn_proxy(port)
+        if not hooks._wait_for_proxy(proxy, port):
+            print(f"dg launch: router did not start on 127.0.0.1:{port}", file=sys.stderr)
+            return 2
+    env = dict(os.environ)
+    prefix = cfg.get("proxy", {}).get("clientPaths", {}).get("launch", "/client/launch")
+    env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{port}{prefix}"
+    env["DG_SESSION_ID"] = session_id
+    argv = [claude, *[a for a in claude_args if a != "--"]]
+    with store.session() as con:
+        store.kv_set(con, "launcher", {"sessionId": session_id, "route": "proxy",
+                                       "since": time.time(), "restarts": 0})
+    print(f"dg launch: proxy=127.0.0.1:{port} session={session_id}", file=sys.stderr)
+    if dry_run:
+        print(" ".join(argv), file=sys.stderr)
+        return 0
+    return subprocess.call(argv, env=env)

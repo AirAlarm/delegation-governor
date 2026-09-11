@@ -65,7 +65,7 @@ class TestNonBlocking(DGTest):
 
         # A finishes; C becomes READY with no further intervention.
         store.finish_attempt(self.con, att, "SUCCEEDED")
-        store.set_status(self.con, a, "SUCCEEDED")
+        store.set_status(self.con, a, "INTEGRATED")
         self.assertEqual(self.states()[c], "READY")
 
     def test_slow_is_not_failed(self):
@@ -402,12 +402,20 @@ class TestCleanupPreservesWork(DGTest):
     def test_integrate_cleanup_reports_the_kept_branch(self):
         from dg import cli
         repo, a, wt = self._finished_task()
-        args = type("A", (), {"id": a, "cleanup": True, "discard": False, "force": False})()
+        attempt = store.attempts_for(self.con, a)[-1]
+        store.finish_attempt(self.con, attempt["id"], "SUCCEEDED")
+        args = type("A", (), {"id": a, "cleanup": True, "discard": False,
+                               "force": False, "accept_equivalent": False,
+                               "note": None})()
+        self.assertEqual(cli.cmd_integrate(args), 4,
+                         "unmerged work must not be declared integrated")
+        gitutil.snapshot(wt["worktree"], "work")
+        gitutil.git(repo, "merge", "--no-ff", "-m", "merge", wt["branch"])
         self.assertEqual(cli.cmd_integrate(args), 0)
         self.assertEqual(store.get_task(self.con, a)["status"], "INTEGRATED")
-        self.assertTrue(gitutil.git(repo, "rev-parse", "--verify", wt["branch"],
-                                    check=False).returncode == 0,
-                        "branch holding the only copy of the work was deleted")
+        self.assertNotEqual(gitutil.git(repo, "rev-parse", "--verify", wt["branch"],
+                                       check=False).returncode, 0,
+                            "verified merged branches should be cleaned up")
 
     def test_a_later_task_can_branch_from_merged_work(self):
         """The end-to-end shape of the original bug."""

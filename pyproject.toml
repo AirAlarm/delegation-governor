@@ -1,7 +1,7 @@
 [project]
 name = "delegation-governor"
-version = "0.1.0"
-description = "Supervisor/worker/task orchestration for Claude Code: Codex-first delegation, cc-delegate fallback, LM Studio supervisor failover."
+version = "0.3.0"
+description = "Multi-endpoint task orchestration for Claude Desktop: Codex, local, Oracle, and OpenRouter workers."
 requires-python = ">=3.11"
 dependencies = []
 

@@ -1,16 +1,17 @@
 # Workers and lanes
 
-A **lane** is a machine, not a tool. Three of them, and they run at the same
-time:
+A **lane** is an independently limited execution endpoint, not a tool. Four of
+them can run at the same time:
 
 | Lane | Machine | Good for |
 |---|---|---|
 | `codex` | cloud | `hard`, `standard` |
 | `station` | the GPU box (one model resident) | `simple`, and anything |
 | `oracle` | a separate CPU VM, slow | `tiny`, `simple` |
+| `openrouter` | metered cloud API | `standard`, `hard`, overflow |
 
-`station` and `oracle` are both reached through cc-delegate but are different
-computers, so they never contend.
+`station`, `oracle`, and `openrouter` are reached through cc-delegate but have
+separate capacity, so they never contend with each other or Codex.
 
 ## Classify every task
 
@@ -30,7 +31,7 @@ dg fill              # start one READY task in each free lane
 dg lanes             # who is busy, who is down, which classes go where
 ```
 
-`dg fill` starts Codex work itself and hands back a work order for each
+`dg fill` starts Codex work through the official Codex Claude plugin and hands back a work order for each
 cc-delegate lane, with the profile to use and the `dg attach ... --lane` to run
 afterwards. Submit those with `run_dev_task`, then attach.
 
@@ -41,8 +42,11 @@ lane falls through to the next rather than blocking.
 
 ## Codex
 
-Started by `dg dispatch <id>`. Returns immediately with a pid and a log path;
-a detached runner owns the run and writes the outcome into the ledger itself.
+Started by `dg dispatch <id>` through `codex@openai-codex`'s companion runtime.
+It returns immediately with the plugin job id and log path; `/codex:status`
+sees the same job and the Governor reconciles the plugin's durable result.
+There is deliberately no raw `codex exec` fallback: if the official plugin is
+missing, disabled, incompatible, or unauthenticated, the Codex lane is down.
 
 WRITE tasks get a git worktree outside your repo, branched from the current
 commit. Your working tree is never touched.
@@ -56,14 +60,17 @@ dg dispatch DG-4              # prints the work order when cc-delegate is chosen
 ```
 then call the MCP tool `run_dev_task` with that work order as `spec`, and:
 ```bash
-dg attach DG-4 <task-id-returned-by-run_dev_task>
+dg attach DG-4 <task-id-returned-by-run_dev_task> --attempt <attempt-id>
 ```
 
 After that the Governor tracks it by reading cc-delegate's own job file - no
 MCP calls, no polling, no tokens. Do not call `get_task_status` in a loop.
 
-Its profiles (`station-main` and friends) are unchanged and still yours to
-choose; the Governor never edits cc-delegate's configuration.
+Its profiles (`station-main`, `oracle-coder`, `openrouter-coder`, and friends)
+are still yours to choose; the Governor never edits cc-delegate configuration.
+OpenRouter is down until `openrouter-coder` exists and its
+`OPENROUTER_API_KEY` is available. That lane uses one metered slot and is never
+selected as the Claude supervisor.
 
 ## Fallback
 
@@ -94,3 +101,7 @@ dg override worker codex        # or cc-delegate
 dg clear-override
 ```
 Forced mode is visible in `dg status` and the statusline.
+
+Codex, Station, Oracle, and OpenRouter reservations are independent. Submit all
+three cc-delegate handoffs immediately after `dg fill`; none waits for Codex or
+another profile.

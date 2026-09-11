@@ -1,4 +1,4 @@
-"""`dg launch` lifecycle supervisor.
+"""`dg launch` proxy wrapper.
 
 Claude Code is never actually started: a fake replaces subprocess.call and
 records the argv/env of every launch, so the whole transition matrix is
@@ -192,8 +192,8 @@ class TestEnvironment(LauncherTest):
 
 
 class TestLifecycle(LauncherTest):
-    def test_hard_quota_relaunches_local_with_same_session(self):
-        """Anthropic -> simulated hard quota -> LOCAL relaunch, session retained."""
+    def test_hard_quota_is_left_to_the_request_router(self):
+        """The child stays put; the proxy switches upstream per request."""
         self.quota(10, 10)
 
         def hit_limit(con):
@@ -203,15 +203,9 @@ class TestLifecycle(LauncherTest):
         rc = launcher.run(self.cfg, [], max_restarts=5)
 
         self.assertEqual(rc, 0)
-        self.assertEqual(len(f.launches), 2, "expected exactly one relaunch")
-        # First launch: Anthropic, session pinned.
-        self.assertIsNone(f.base_url(0))
-        sid = f.arg(0, "--session-id")
-        self.assertTrue(sid)
-        # Second launch: LM Studio, same session resumed, local model explicit.
-        self.assertEqual(f.base_url(1), "http://127.0.0.1:1234")
-        self.assertEqual(f.arg(1, "--resume"), sid, "session id must be preserved")
-        self.assertEqual(f.arg(1, "--model"), "local/main")
+        self.assertEqual(len(f.launches), 1)
+        self.assertEqual(f.base_url(0), "http://127.0.0.1:8787/client/launch")
+        self.assertTrue(f.launches[0]["env"].get("DG_SESSION_ID"))
 
     def test_ledger_and_running_jobs_survive_the_restart(self):
         self.quota(10, 10)
@@ -240,7 +234,7 @@ class TestLifecycle(LauncherTest):
         finally:
             con2.close()
 
-    def test_reset_relaunches_back_on_anthropic(self):
+    def test_reset_does_not_require_a_process_relaunch(self):
         self.quota(99, 10, resets_in=-5)
         supervisor.record_hard_limit(self.con, "rate_limit")
         calls = {"n": 0}
@@ -257,11 +251,8 @@ class TestLifecycle(LauncherTest):
         f = self.fake([(0, 100.0, None), (0, 100.0, None)])
         launcher.run(self.cfg, [], max_restarts=5)
 
-        self.assertEqual(len(f.launches), 2)
-        self.assertEqual(f.base_url(0), "http://127.0.0.1:1234")  # started LOCAL
-        self.assertIsNone(f.base_url(1))                          # returned to Anthropic
-        self.assertEqual(f.arg(1, "--resume"), f.arg(0, "--session-id"))
-        self.assertEqual(f.arg(1, "--model"), "sonnet")
+        self.assertEqual(len(f.launches), 1)
+        self.assertEqual(f.base_url(0), "http://127.0.0.1:8787/client/launch")
 
     def test_user_quitting_does_not_relaunch(self):
         self.quota(10, 10)
@@ -270,28 +261,29 @@ class TestLifecycle(LauncherTest):
         self.assertEqual(rc, 0)
         self.assertEqual(len(f.launches), 1, "a plain quit must not be treated as a switch")
 
-    def test_quitting_after_switch_does_not_relaunch_again(self):
+    def test_quitting_after_router_switch_does_not_relaunch(self):
         self.quota(10, 10)
         f = self.fake([(0, 100.0, lambda con: supervisor.record_hard_limit(con, "rate_limit")),
                        (0, 100.0, None)])
         launcher.run(self.cfg, [], max_restarts=5)
-        self.assertEqual(len(f.launches), 2)
+        self.assertEqual(len(f.launches), 1)
 
-    def test_dead_local_endpoint_gives_a_recovery_path_not_a_loop(self):
+    def test_dead_local_endpoint_is_handled_by_the_router(self):
         self.quota(99, 10)
         launcher.probe_tier = lambda t, load=False: (False, f"{t['name']}: connection refused")
         f = self.fake([(0, 100.0, None)])
         rc = launcher.run(self.cfg, [], max_restarts=5)
-        self.assertEqual(rc, 2)
-        self.assertEqual(f.launches, [], "must not start Claude against a dead backend")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(f.launches), 1)
+        self.assertEqual(f.base_url(0), "http://127.0.0.1:8787/client/launch")
 
-    def test_force_starts_on_anthropic_when_local_is_dead(self):
+    def test_force_keeps_the_same_proxy_boundary(self):
         self.quota(99, 10)
         launcher.probe_tier = lambda t, load=False: (False, f"{t['name']}: connection refused")
         f = self.fake([(0, 500.0, None)])
         rc = launcher.run(self.cfg, [], force=True, max_restarts=5)
         self.assertEqual(rc, 0)
-        self.assertIsNone(f.base_url(0))
+        self.assertEqual(f.base_url(0), "http://127.0.0.1:8787/client/launch")
 
     def test_restart_loop_protection(self):
         """Sessions that die instantly while flapping must stop, not spin."""
@@ -325,14 +317,14 @@ class TestLifecycle(LauncherTest):
         # Healthy uptime, so strikes never accrue: only the budget stops it.
         f = self.fake([(0, 500.0, toggle)] * 20)
         launcher.run(self.cfg, [], max_restarts=3)
-        self.assertEqual(len(f.launches), 4)
+        self.assertEqual(len(f.launches), 1)
 
     def test_launcher_state_is_recorded_for_doctor(self):
         self.quota(10, 10)
         self.fake([(0, 500.0, None)])
         launcher.run(self.cfg, [], max_restarts=1)
         lp = store.kv_get(self.con, "launcher")
-        self.assertEqual(lp["route"], launcher.ANTHROPIC)
+        self.assertEqual(lp["route"], "proxy")
         self.assertTrue(lp["sessionId"])
 
     def test_dry_run_starts_nothing(self):
@@ -472,13 +464,14 @@ class TestLocalModelResidency(LauncherTest):
         self.assertFalse(ok)
         self.assertIn("autoLoad is off", detail)
 
-    def test_launch_refuses_local_when_the_model_cannot_be_loaded(self):
+    def test_launch_defers_model_availability_to_the_router(self):
         self.quota(99, 10)
         launcher.probe_tier = lambda t, load=False: (False, f"{t['name']}: out of memory")
         f = self.fake([(0, 100.0, None)])
         rc = launcher.run(self.cfg, [], max_restarts=2)
-        self.assertEqual(rc, 2)
-        self.assertEqual(f.launches, [], "must not start Claude with an unusable model")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(f.launches), 1)
+        self.assertEqual(f.base_url(0), "http://127.0.0.1:8787/client/launch")
 
 
 class TestSharedModelSlot(LauncherTest):
@@ -685,3 +678,17 @@ class TestInstallPreservesProxyWiring(LauncherTest):
         a = p.parse_args(["install"])
         self.assertFalse(a.proxy)
         self.assertFalse(a.no_proxy)
+
+    def test_legacy_dg_hook_is_planned_as_an_update(self):
+        from dg import install
+        settings = {"hooks": {"UserPromptSubmit": [{"hooks": [{
+            "type": "command", "command": "dg hook prompt", "timeout": 10}]}]}}
+        lines = install.plan(settings, proxy=False)
+        self.assertTrue(any("UserPromptSubmit: UPDATE" in line for line in lines), lines)
+
+    def test_managed_hook_command_uses_versioned_runtime(self):
+        from dg import install
+        command = install.HOOKS_SPEC["UserPromptSubmit"]["command"]
+        self.assertIn("runtimes", command)
+        self.assertIn("0.3.0", command)
+        self.assertIn("-m dg.cli hook prompt", command)

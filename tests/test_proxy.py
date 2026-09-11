@@ -110,12 +110,12 @@ class ProxyTest(DGTest):
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         return router
 
-    def post(self, body=None, headers=None):
+    def post(self, body=None, headers=None, path="/v1/messages"):
         data = json.dumps(body or {
             "model": "claude-sonnet-4-6", "max_tokens": 4,
             "messages": [{"role": "user", "content": "hi"}]}).encode()
         req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}/v1/messages", data=data, method="POST",
+            f"http://127.0.0.1:{self.port}{path}", data=data, method="POST",
             headers={"content-type": "application/json", **(headers or {})})
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status, r.read()
@@ -171,23 +171,21 @@ class TestRouting(ProxyTest):
         self.assertEqual(seen["authorization"], "Bearer tier-secret")
         self.assertIsNone(seen["anthropic-beta"], "oauth beta flags must be stripped")
 
-    def test_no_usable_tier_falls_back_to_anthropic(self):
-        """Anthropic's own error is more useful than one we invent."""
-        launcher.first_usable_tier = lambda cfg, load=False: (None, ["nothing answered"])
+    def test_no_configured_tier_does_not_retry_exhausted_anthropic(self):
+        self.cfg["supervisorFallbacks"] = []
         supervisor.record_hard_limit(self.con, "rate_limit")
         router = proxy.Router(self.cfg, reload=False)
         kind, tier, reason = router.route()
-        self.assertEqual(kind, "anthropic")
-        self.assertIn("no fallback tier answered", reason)
+        self.assertEqual(kind, "tier")
+        self.assertIsNone(tier)
+        self.assertIn("no fallback tier", reason)
 
-    def test_tier_choice_is_cached_briefly(self):
-        calls = []
-        launcher.first_usable_tier = lambda cfg, load=False: (calls.append(1), ({"name": "x"}, []))[1]
+    def test_failed_tier_is_cooled_down(self):
         supervisor.record_hard_limit(self.con, "rate_limit")
         router = proxy.Router(self.cfg, reload=False)
-        for _ in range(5):
-            router.route()
-        self.assertEqual(len(calls), 1, "probed the tier on every request")
+        tier = self.cfg["supervisorFallbacks"][0]
+        router.cooldown(tier, "down")
+        self.assertNotIn(tier, router.fallbacks())
 
 
 class TestQuotaCapture(ProxyTest):
@@ -224,6 +222,24 @@ class TestQuotaCapture(ProxyTest):
         router = proxy.Router(self.cfg, reload=False)
         router.note_hard_limit(200, b"{}")
         self.assertIsNone(store.kv_get(self.con, supervisor.K_HARD))
+
+
+class TestFailover(ProxyTest):
+    def test_qwen_failure_retries_oracle_in_same_request(self):
+        first, second = self.upstream(status=500), self.upstream(status=200)
+        self.cfg["supervisorFallbacks"] = [
+            {"name": "qwen", "kind": "remote", "baseUrl": first.url, "model": "qwen"},
+            {"name": "oracle", "kind": "remote", "baseUrl": second.url, "model": "oracle"},
+        ]
+        supervisor.record_hard_limit(self.con, "rate_limit")
+        router = self.start_proxy(self.cfg)
+        status, _ = self.post(path="/client/desktop/v1/messages")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(first.seen), 1)
+        self.assertEqual(len(second.seen), 1)
+        self.assertEqual(second.seen[0]["path"], "/v1/messages")
+        self.assertEqual(router.last["client"], "desktop")
+        self.assertEqual(router.last["tier"], "oracle")
 
 
 class TestBodyRewrite(DGTest):

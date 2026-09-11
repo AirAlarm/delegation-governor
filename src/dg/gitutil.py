@@ -31,6 +31,11 @@ def head_commit(repo: str) -> str:
     return git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
+def current_branch(repo: str) -> str | None:
+    p = git(repo, "symbolic-ref", "--short", "HEAD", check=False)
+    return p.stdout.strip() or None
+
+
 def worktree_root(repo: str) -> Path:
     """Per-repo worktree area inside the Governor's state dir.
 
@@ -72,6 +77,29 @@ def is_merged(repo: str, branch: str) -> bool:
     """Is every commit on `branch` already reachable from HEAD?"""
     return git(repo, "merge-base", "--is-ancestor", branch, "HEAD",
                check=False).returncode == 0
+
+
+def _patch_id(repo: str, commit: str) -> str | None:
+    shown = git(repo, "show", "--pretty=format:", "--binary", commit, check=False)
+    if shown.returncode != 0:
+        return None
+    p = subprocess.run(["git", "patch-id", "--stable"], input=shown.stdout,
+                       capture_output=True, text=True)
+    return p.stdout.split()[0] if p.returncode == 0 and p.stdout.split() else None
+
+
+def integration_state(repo: str, branch: str, base: str) -> dict[str, Any]:
+    """Verify a merge by ancestry or a cherry-pick by stable patch identity."""
+    if is_merged(repo, branch):
+        return {"integrated": True, "method": "merge", "missingPatchIds": []}
+    worker = git(repo, "rev-list", "--reverse", "--no-merges", f"{base}..{branch}",
+                 check=False).stdout.split()
+    main = git(repo, "rev-list", "--no-merges", f"{base}..HEAD", check=False).stdout.split()
+    worker_ids = [p for c in worker if (p := _patch_id(repo, c))]
+    main_ids = {p for c in main if (p := _patch_id(repo, c))}
+    missing = [p for p in worker_ids if p not in main_ids]
+    return {"integrated": bool(worker_ids) and not missing, "method": "cherry-pick",
+            "missingPatchIds": missing, "workerCommits": worker}
 
 
 def snapshot(worktree: str, message: str) -> bool:

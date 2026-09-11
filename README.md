@@ -1,9 +1,13 @@
 # Delegation Governor
 
-Keeps Claude Code as supervisor, pushes implementation to Codex (falling back
-to `cc-delegate`), and keeps a dependency-aware ledger so Claude never sits
-idle waiting on a worker. When Anthropic quota runs out it relaunches the same
-session against LM Studio and brings it back when the window resets.
+Keeps Claude Desktop or Claude Code as supervisor, pushes implementation through
+the official Codex Claude plugin or `cc-delegate`, and keeps a dependency-aware
+ledger so Claude never sits idle waiting on a worker. Codex, local Qwen, Oracle,
+and OpenRouter are independent worker lanes and can all run at once.
+
+The optional loopback request router is for terminal Claude Code only. Personal
+Claude Desktop manages its own `ANTHROPIC_BASE_URL`, so Desktop uses the task
+Governor but does not receive automatic supervisor-model fallback.
 
 Stock `claude` is never shadowed. Everything installs additively and reverses.
 
@@ -42,30 +46,27 @@ for the decisions and what was verified rather than assumed.
 Two facts shaped the design, both verified live:
 
 1. **LM Studio already serves the Anthropic Messages API** at `/v1/messages`,
-   so no router or translation layer is needed - CCR was dropped.
-2. **Claude Code fixes its backend at process start** from `process.env`, so
-   failover is a process lifecycle, not a runtime switch. `dg launch`
-   supervises that lifecycle and switches only at Claude Code's own exit,
-   which is the one boundary where no tool call can be interrupted. Fallbacks
-   are tried in order: LM Studio, then the always-on Oracle VM.
+   so the router forwards requests without a translation layer.
+2. **Claude Code fixes its base URL at process start.** It therefore points at
+   one stable loopback URL; the router changes upstream only between requests.
+   Fallbacks are tried independently in order: local Qwen, then Oracle.
 
 ## Requirements
 
-Windows/macOS/Linux, git, Python 3.11+ (via `uv`), Claude Code 2.1+.
-Optional: Codex CLI logged in; cc-delegate plugin; LM Studio for local
-supervision. Missing pieces degrade gracefully - `dg doctor` says what is
-absent and what it costs you.
+Windows, git, Python 3.11+ (via `uv`), Claude Desktop/Code, and the official
+Codex Claude plugin (`codex@openai-codex`) with Codex authenticated.
+cc-delegate, LM Studio, Oracle, and OpenRouter are optional lanes. Missing pieces
+are marked unavailable rather than silently replaced with a different transport.
 
 ## Install
 
 ```bash
 git clone <this repo> && cd delegation-governor
-uv venv --python 3.14 && uv pip install -e .
-uv tool install --force .          # puts `dg` on PATH
+uv venv --python 3.14 && uv pip install --python .venv/Scripts/python.exe -e .
 
 dg install --dry-run               # show every change first
-dg install
-dg doctor
+.venv/Scripts/dg install --proxy   # stable runtime, PATH shim, hooks, router
+dg doctor --force
 ```
 
 `dg install` backs up `~/.claude/settings.json` to `~/.claude/backups/` with a
@@ -99,6 +100,27 @@ the weights are mapped, so polling immediately wastes the budget.
 **After applying, restart the Claude Code session** — the cc-delegate MCP server
 imports the gate once at startup and caches it.
 
+### OpenRouter lane
+
+OpenRouter is a worker lane, not a Claude supervisor fallback. Configure the
+cc-delegate profile once through its MCP configuration tools:
+
+```text
+set_model_profile(
+  name="openrouter-coder",
+  model="litellm:openrouter/qwen/qwen3-coder-next",
+  api_key_env_var="OPENROUTER_API_KEY",
+  api_base="https://openrouter.ai/api/v1"
+)
+store_api_key(profile="openrouter-coder")  # omit key; enter it in the secure prompt
+```
+
+The model is deliberately profile-owned: replace it with any OpenRouter model
+whose price and tool-calling quality suit you. `dg lanes` checks that the
+profile exists, validates the API key through OpenRouter's non-inference key
+endpoint, and reports an exhausted key spending limit as unavailable. The key
+is never stored in Governor configuration or logs.
+
 It adds exactly three integration points:
 
 | Where | What | Cost |
@@ -112,8 +134,8 @@ plus the skill at `~/.claude/skills/delegation-governor/`.
 ## Use
 
 ```bash
-dg launch                     # lifecycle-supervised session (recommended)
-claude                        # stock Claude Code, Governor bypassed
+claude                        # routed after `dg install --proxy`
+dg launch                     # same router, explicit /client/launch identity
 ```
 
 Inside a session, Claude drives the ledger itself via the skill. By hand:
@@ -125,7 +147,8 @@ C=$(dg add "integration tests" --repo . --path 'tests/**' --depends-on $A)
 dg tasks ready                # what can run now, best first
 dg dispatch $A                # claim + start a worker, returns immediately
 dg tasks                      # A RUNNING, C BLOCKED
-dg collect $A                 # result + which tasks just unblocked
+dg collect $A                 # review branch/commit and changed files
+git merge --no-ff dg/dg-1     # or cherry-pick the reported commit
 dg integrate $A --cleanup
 ```
 
@@ -146,7 +169,9 @@ dg integrate $A --cleanup
 | `dg workorder <id>` | render the bounded contract |
 | `dg dispatch <id>` | claim + start, non-blocking |
 | `dg attach <id> <cc-task-id>` | register a cc-delegate job |
-| `dg collect <id>` / `dg integrate <id>` | result / accept (`--cleanup` keeps unmerged branches) |
+| `dg collect <id>` / `dg integrate <id>` | result / verify an already merged or cherry-picked result |
+| `dg release <id>` / `dg cancel <id>` | release a handoff or cancel active work |
+| `dg recover-handoffs` | reconnect jobs launched across a CLI crash |
 | `dg fallback <id>` | clean retry after a failure |
 | `dg worker-status` / `dg logs [<id>]` | live attempts / worker logs |
 | `dg probe codex\|claude` | confirm a provider really recovered |
@@ -173,10 +198,21 @@ dg integrate $A --cleanup
     "blockingLimitIds": ["codex"]              // gpt-reserve never blocks
   },
   "workers": {
-    "codex":       { "maxWriteJobsPerRepo": 1 },
-    "cc-delegate": { "maxWriteJobsPerRepo": 1 },
-    "totalWriteJobsPerRepo": 2,
-    "maxReadOnlyJobs": 3,
+    "lanes": {
+      "codex":  { "worker": "codex", "maxWriteJobs": 1 },
+      "station": { "worker": "cc-delegate", "profile": "station-main", "maxWriteJobs": 1 },
+      "oracle":  { "worker": "cc-delegate", "profile": "oracle-coder", "maxWriteJobs": 2 },
+      "openrouter": { "worker": "cc-delegate", "profile": "openrouter-coder",
+                      "endpoint": "openrouter", "maxWriteJobs": 1 }
+    },
+    "classRouting": {
+      "hard": ["codex", "openrouter", "station"],
+      "standard": ["openrouter", "codex", "station", "oracle"],
+      "simple": ["station", "openrouter", "oracle", "codex"],
+      "tiny": ["oracle", "station", "openrouter"]
+    },
+    "totalWriteJobsPerRepo": 4,
+    "maxReadOnlyJobs": 4,
     "slowAfterSeconds": 900,                   // flagged SLOW, never killed
     "hardTimeoutSeconds": 0,                   // 0 = no hard kill
     "minCheckSpacingSeconds": 60
@@ -185,12 +221,12 @@ dg integrate $A --cleanup
   "supervisorFallbacks": [
     { "name": "lmstudio", "kind": "lmstudio",       // GPU box: fast, one model slot
       "baseUrl": "http://127.0.0.1:1234",
-      "model": "openai/gpt-oss-20b",                // 12GB: fits alongside 128k ctx
-      "smallModel": "openai/gpt-oss-20b",
+      "model": "qwen/qwen3.5-9b",
+      "smallModel": "qwen/qwen3.5-9b",
       "tokenEnvVar": "LMSTUDIO_API_KEY",            // name only, never the value
-      "contextLength": 131072,                      // loaded via `lms load -c`
+      "contextLength": 65536,                       // loaded via `lms load -c`
       "minContextLength": 40960,                    // Claude Code's prompt is ~34k
-      "loadTimeoutSeconds": 600, "ttlSeconds": 3600,
+      "loadTimeoutSeconds": 600, "ttlSeconds": 14400,
       "autoLoad": true },                           // false = you manage residency
     { "name": "oracle", "kind": "remote",           // always-on VM: slow CPU ARM
       "baseUrl": "https://claude-llm.vibecodelabs.org",
@@ -228,11 +264,12 @@ Work is scheduled onto **lanes** -- machines, not tools:
 | `codex` | cloud | 1 | `hard`, `standard`, `simple` |
 | `station` | the GPU box (one resident model) | 1 | all classes |
 | `oracle` | a separate CPU VM | 2 | `tiny`, `simple`, `standard` |
+| `openrouter` | metered cloud API | 1 | `standard`, `hard`, overflow |
 
-`station` and `oracle` both go through cc-delegate but are different computers,
-so they run concurrently. Tasks carry a class (`--class`) and routing prefers
-the lane that suits them, falling through when one is busy or down -- so a
-trivial edit does not consume the Codex slot a hard task needs.
+`station`, `oracle`, and `openrouter` all go through cc-delegate but have
+independent capacity, so they run concurrently with each other and Codex. Tasks
+carry a class (`--class`) and routing prefers the lane that suits them, falling
+through when one is busy, unconfigured, out of credit, or down.
 
 `dg fill` starts one READY task in every free lane at once.
 
@@ -244,8 +281,10 @@ trivial edit does not consume the Codex slot a hard task needs.
 - Atomic claiming: `BEGIN IMMEDIATE`, so two sessions cannot claim one task.
 - WRITE work runs in a git worktree **outside** your repo, branched from the
   current commit. Your working tree is never touched, not even on failure.
-- Cleanup never loses work: loose worker output is committed to its branch, and
-  an unmerged branch is kept (with a note) unless you pass `--discard`.
+- `dg integrate` refuses to mark WRITE work integrated until the worker branch
+  is an ancestor of HEAD or all of its patch IDs are present. After that,
+  `--cleanup` can safely remove its worktree and branch. A reviewed manual copy
+  needs `--accept-equivalent --note "..."`.
 
 ## Quota behaviour
 
@@ -257,8 +296,9 @@ trivial edit does not consume the Codex slot a hard task needs.
 | Codex auth/network error | distinguished from quota; cooldown; actionable warning |
 | Codex reset passes | probed at zero inference; READY only on confirmation |
 | Claude at SAVE threshold | delegate harder; same backend |
-| Claude hard rate limit | hook records it; next exit relaunches on LM Studio, same session |
-| Anthropic recovers | probed for real; same session relaunched on Anthropic |
+| Claude hard rate limit | current failed response is recorded; the next request tries Qwen, then Oracle |
+| Qwen malformed tool call / retryable failure | response is buffered and retried on Oracle before bytes reach Claude |
+| Anthropic recovers | a real probe clears the limit; a later request returns to Anthropic |
 | Reset credits available | shown in `dg quota`, **never consumed automatically** |
 
 ## Troubleshooting
@@ -272,16 +312,17 @@ trivial edit does not consume the Codex slot a hard task needs.
 | Codex stuck exhausted | `dg quota --force`, then `dg probe codex` |
 | Task stuck BLOCKED | `dg show <id>` - the `reason` field names the cause |
 | Everything BLOCKED on capacity | raise `totalWriteJobsPerRepo`, or integrate finished work |
-| `dg launch` refuses to start | LM Studio unreachable or its model will not load while LOCAL; the message lists the fixes |
-| `exceed_context_size_error` on LOCAL | the model is loaded with too little context; `dg launch` reloads it, or `lms load <model> -c 131072 -y` |
+| Claude still says “Sonnet 4.6” | expected: that banner is the client-selected model, not proof of which upstream served a request; inspect `dg proxy --status` |
+| Desktop rejects `ANTHROPIC_BASE_URL` | expected on personal Desktop; use worker delegation there, and reserve the router for terminal Claude Code |
+| `exceed_context_size_error` on LOCAL | load the configured LM Studio model with at least the configured context |
 | cc-delegate times out while LOCAL | both share one LM Studio model slot - see the `dg doctor` warning; delegate to Codex or an `oracle-*` profile instead |
 | Worker seems hung | `dg worker-status` - `SLOW` is normal for a cold local model |
 
 ## Upgrade
 
 ```bash
-git pull && uv pip install -e . && uv tool install --force .
-dg install          # re-merges hooks idempotently, backs up again
+git pull && uv pip install --python .venv/Scripts/python.exe -e .
+.venv/Scripts/dg install --proxy  # rebuilds the managed runtime and re-merges hooks
 dg doctor
 ```
 
@@ -295,9 +336,10 @@ dg uninstall              # removes hooks + skill, restores previous statusline
 dg uninstall --purge      # also deletes the ledger and logs
 ```
 
-Or just run `claude` - the Governor is bypassed entirely. `cc-delegate` and
-every other plugin remain untouched either way. Timestamped settings backups
-stay in `~/.claude/backups/`.
+`dg uninstall` removes the persistent router URL, so subsequent `claude`
+sessions go directly to their previous endpoint. `cc-delegate` and every other
+plugin remain untouched. Timestamped settings backups stay in
+`~/.claude/backups/`.
 
 ## Development
 

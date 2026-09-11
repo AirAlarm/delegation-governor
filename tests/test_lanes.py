@@ -1,7 +1,7 @@
-"""Lanes: class routing, per-machine capacity, and real three-way concurrency.
+"""Lanes: class routing, per-endpoint capacity, and real four-way concurrency.
 
 The point of lanes is that `station` and `oracle` are different computers, so
-they can work at the same time as Codex. These tests pin that.
+they can work at the same time as Codex and OpenRouter. These tests pin that.
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ class LaneTest(DGTest):
     def setUp(self):
         super().setUp()
         # Every lane healthy unless a test says otherwise.
-        self.avail = {"codex": [True, "ok"], "station": [True, "ok"], "oracle": [True, "ok"]}
+        self.avail = {"codex": [True, "ok"], "station": [True, "ok"],
+                      "oracle": [True, "ok"], "openrouter": [True, "ok"]}
         lanes.availability = lambda con, cfg, refresh=True: self.avail
 
     def task(self, title="t", mode="WRITE", deps=(), paths=(), repo="/repo",
@@ -44,15 +45,15 @@ class TestClassRouting(LaneTest):
     def test_tiny_prefers_the_vm(self):
         self.assertEqual(self.choose(self.task(task_class="tiny"))["lane"], "oracle")
 
-    def test_standard_still_prefers_codex(self):
-        self.assertEqual(self.choose(self.task(task_class="standard"))["lane"], "codex")
+    def test_standard_prefers_openrouter(self):
+        self.assertEqual(self.choose(self.task(task_class="standard"))["lane"], "openrouter")
 
     def test_unknown_class_falls_back_to_the_default(self):
         tid = self.task()
         self.con.execute("UPDATE tasks SET task_class='nonsense' WHERE id=?", (tid,))
         out = self.choose(tid)
         self.assertEqual(out["taskClass"], "standard")
-        self.assertEqual(out["lane"], "codex")
+        self.assertEqual(out["lane"], "openrouter")
 
     def test_routing_table_is_configurable(self):
         self.cfg["workers"]["classRouting"]["hard"] = ["oracle", "codex"]
@@ -63,26 +64,30 @@ class TestFallThrough(LaneTest):
     def test_busy_preferred_lane_falls_through(self):
         self.occupy("codex", paths=("a/**",))
         out = self.choose(self.task(task_class="hard", paths=("b/**",)))
-        self.assertEqual(out["lane"], "station")
+        self.assertEqual(out["lane"], "openrouter")
         self.assertIn("codex: at capacity", out["skipped"])
 
     def test_unavailable_lane_falls_through(self):
         self.avail["codex"] = [False, "CODEX_EXHAUSTED"]
         out = self.choose(self.task(task_class="hard"))
-        self.assertEqual(out["lane"], "station")
+        self.assertEqual(out["lane"], "openrouter")
         self.assertIn("codex: CODEX_EXHAUSTED", out["skipped"])
 
     def test_no_lane_left_is_reported_not_guessed(self):
-        for lane in ("codex", "station", "oracle"):
+        for lane in ("codex", "station", "oracle", "openrouter"):
             self.avail[lane] = [False, "down"]
         out = self.choose(self.task())
         self.assertIsNone(out["lane"])
         self.assertIn("no lane available", out["reason"])
-        self.assertEqual(len(out["skipped"]), 3)
+        self.assertEqual(len(out["skipped"]), 4)
 
-    def test_hard_never_lands_on_the_vm(self):
-        """`hard` lists only codex and station: it waits rather than going slow."""
+    def test_hard_uses_openrouter_before_the_local_gpu(self):
         self.avail["codex"] = [False, "down"]
+        self.assertEqual(self.choose(self.task(task_class="hard"))["lane"], "openrouter")
+
+    def test_hard_never_lands_on_the_slow_vm(self):
+        self.avail["codex"] = [False, "down"]
+        self.avail["openrouter"] = [False, "down"]
         self.avail["station"] = [False, "down"]
         self.assertIsNone(self.choose(self.task(task_class="hard"))["lane"])
 
@@ -90,7 +95,7 @@ class TestFallThrough(LaneTest):
         self.cfg["overrides"]["worker"] = "cc-delegate"
         out = self.choose(self.task(task_class="hard"))
         self.assertEqual(out["worker"], "cc-delegate")
-        self.assertIn(out["lane"], ("station", "oracle"))
+        self.assertIn(out["lane"], ("openrouter", "station", "oracle"))
 
 
 class TestCapacity(LaneTest):
@@ -101,6 +106,7 @@ class TestCapacity(LaneTest):
         self.assertNotIn("station", free)
         self.assertIn("oracle", free, "the VM must stay free when the GPU is busy")
         self.assertIn("codex", free)
+        self.assertIn("openrouter", free)
 
     def test_oracle_takes_two(self):
         self.occupy("oracle", paths=("a/**",))
@@ -125,15 +131,16 @@ class TestCapacity(LaneTest):
         self.assertFalse(lanes.has_capacity(self.con, "codex", "/repo", self.cfg))
 
 
-class TestThreeLaneConcurrency(LaneTest):
-    def test_three_tasks_run_on_three_machines_at_once(self):
+class TestFourLaneConcurrency(LaneTest):
+    def test_four_tasks_run_on_four_endpoints_at_once(self):
         """The acceptance criterion for this feature."""
         hard = self.task("refactor", task_class="hard", paths=("src/core/**",))
+        standard = self.task("new endpoint", task_class="standard", paths=("src/api/**",))
         simple = self.task("update call sites", task_class="simple", paths=("src/web/**",))
         tiny = self.task("regen fixtures", task_class="tiny", paths=("fixtures/**",))
 
         placed = {}
-        for tid in (hard, simple, tiny):
+        for tid in (hard, standard, simple, tiny):
             out = self.choose(tid)
             self.assertIsNotNone(out["lane"], f"{tid} found no lane")
             placed[tid] = out["lane"]
@@ -141,20 +148,23 @@ class TestThreeLaneConcurrency(LaneTest):
             store.add_attempt(self.con, tid, out["worker"], lane=out["lane"])
 
         self.assertEqual(placed[hard], "codex")
+        self.assertEqual(placed[standard], "openrouter")
         self.assertEqual(placed[simple], "station")
         self.assertEqual(placed[tiny], "oracle")
-        self.assertEqual(len(set(placed.values())), 3, "all three must be distinct machines")
+        self.assertEqual(len(set(placed.values())), 4, "all four must be distinct endpoints")
 
         counts = lanes.in_flight(self.con, "/repo")
-        self.assertEqual(counts, {"codex": 1, "station": 1, "oracle": 1})
+        self.assertEqual(counts, {"codex": 1, "openrouter": 1, "station": 1,
+                                  "oracle": 1})
 
-    def test_a_fourth_task_waits(self):
-        for cls, paths in (("hard", "a/**"), ("simple", "b/**"), ("tiny", "c/**")):
+    def test_a_fifth_task_waits(self):
+        for cls, paths in (("hard", "a/**"), ("standard", "b/**"),
+                           ("simple", "c/**"), ("tiny", "d/**")):
             tid = self.task(cls, task_class=cls, paths=(paths,))
             out = self.choose(tid)
             store.set_status(self.con, tid, "RUNNING")
             store.add_attempt(self.con, tid, out["worker"], lane=out["lane"])
-        self.assertIsNone(self.choose(self.task("fourth", paths=("d/**",)))["lane"])
+        self.assertIsNone(self.choose(self.task("fifth", paths=("e/**",)))["lane"])
 
     def test_read_only_tasks_ignore_write_capacity(self):
         self.occupy("codex", paths=("a/**",))
@@ -188,6 +198,7 @@ class TestSchedulerIntegration(LaneTest):
                                                        self.cfg))
         self.occupy("oracle", paths=("b/**",))
         self.occupy("oracle", paths=("c/**",))
+        self.occupy("openrouter", paths=("d/**",))
         self.assertFalse(scheduler.worker_capacity_free(self.con, "cc-delegate", "/repo",
                                                         self.cfg))
 
@@ -219,6 +230,6 @@ class TestTaskClassPersistence(DGTest):
             self.assertIn("lane", acols)
             self.assertEqual(
                 con.execute("SELECT value FROM meta WHERE key='schemaVersion'")
-                .fetchone()["value"], "2")
+                .fetchone()["value"], "3")
         finally:
             con.close()

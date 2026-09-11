@@ -28,18 +28,22 @@ You own this judgement. A worker reporting success is a claim, not evidence.
 ## Integrate
 
 ```bash
-dg integrate DG-4 --cleanup      # marks INTEGRATED, retires the worktree
+git merge --no-ff dg/dg-4        # or cherry-pick the commit shown by collect
+dg integrate DG-4 --cleanup      # verifies, marks INTEGRATED, retires worktree
 ```
 
-`integrate` records the decision; it does **not** merge for you. The work is on
-branch `dg/dg-4` - merge, cherry-pick or copy it as the situation needs.
+`integrate` does **not** merge for you. The work is on branch `dg/dg-4`; merge
+or cherry-pick it first. The command then verifies ancestry or patch identity
+before it records the decision.
 
-`--cleanup` is safe: it commits whatever the worker left loose onto that branch,
-removes the worktree, and **keeps the branch unless it is already merged into
-HEAD**, telling you so. Only `--cleanup --discard` throws unmerged work away.
+`--cleanup` runs only after verification and removes the retired worktree and
+branch. If a reviewed squash or manual copy is semantically equivalent but
+patch identity cannot prove it, use `--accept-equivalent --note "reason"` so
+the exceptional judgement is explicit in the ledger.
 
-Dependants become READY the moment the parent is `SUCCEEDED`; `INTEGRATED`
-also satisfies them.
+Dependants become READY only after the parent is `INTEGRATED`. `SUCCEEDED`
+means worker output exists and is ready for review; it is not yet safe input
+for a dependent task.
 
 ## Not accepting the result
 

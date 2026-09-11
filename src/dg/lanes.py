@@ -5,9 +5,10 @@ through cc-delegate, but they are different computers and can run at the same
 time -- modelling them as one worker gave them a shared slot and left the VM
 idle whenever the GPU was busy.
 
-    codex     cloud, contends with nothing local
-    station   the GPU box; one model resident at a time, so one job
-    oracle    a separate CPU VM; slow, contends with nothing
+    codex       cloud, contends with nothing local
+    station     the GPU box; one model resident at a time, so one job
+    oracle      a separate CPU VM; slow, contends with nothing
+    openrouter  metered cloud endpoint, independent of all three
 
 Routing picks a lane by task class first and availability second, so a trivial
 edit does not consume the Codex slot that a hard task needs.
@@ -49,7 +50,7 @@ def _norm_repo(repo: str) -> str:
 
 
 def in_flight(con: sqlite3.Connection, repo: str) -> dict[str, int]:
-    """Running WRITE attempts per lane in this repo."""
+    """Reserved or running WRITE attempts per lane in this repo."""
     repo = _norm_repo(repo)
     counts: dict[str, int] = {}
     for a in store.running_attempts(con):
@@ -102,9 +103,15 @@ def availability(con: sqlite3.Connection, cfg: dict, refresh: bool = True) -> di
 
     for name, spec in lanes(cfg).items():
         if spec["worker"] == "codex":
+            from .workers import codex_plugin
+            plugin = codex_plugin.discover()
+            if not plugin["ok"]:
+                out[name] = [False, plugin["reason"]]
+                continue
             st = quota_codex.refresh(con, cfg)["state"]
             out[name] = [st == quota_codex.READY,
-                         "codex ready" if st == quota_codex.READY else st]
+                         f"codex plugin {plugin.get('version')} ready"
+                         if st == quota_codex.READY else st]
             continue
         tier_name = spec.get("tier")
         if tier_name and tier_name == local_supervisor_tier:
@@ -113,6 +120,18 @@ def availability(con: sqlite3.Connection, cfg: dict, refresh: bool = True) -> di
             out[name] = [False, f"{tier_name} is hosting the local supervisor"]
             continue
         t = launcher.tier(cfg, tier_name) if tier_name else None
+        endpoint_name = spec.get("endpoint")
+        if endpoint_name:
+            from .workers import cc_delegate
+            profile = cc_delegate.profile(endpoint_name=endpoint_name,
+                                          profile_name=spec.get("profile"))
+            if not profile["ok"]:
+                out[name] = [False, profile["reason"]]
+                continue
+            t = cfg["workers"].get("endpoints", {}).get(endpoint_name)
+            if t is None:
+                out[name] = [False, f"worker endpoint {endpoint_name!r} is not configured"]
+                continue
         if t is None:
             out[name] = [True, "no tier probe configured"]
             continue

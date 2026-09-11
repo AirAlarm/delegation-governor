@@ -20,7 +20,7 @@ class DGTest(unittest.TestCase):
                      "sync", "launcher", "workorder", "install", "hooks"):
             mod = importlib.import_module(f"dg.{name}")
             importlib.reload(mod)
-        for name in ("codex", "cc_delegate", "codex_runner"):
+        for name in ("codex", "codex_plugin", "cc_delegate", "codex_runner"):
             importlib.reload(importlib.import_module(f"dg.workers.{name}"))
         from dg import store
         self.store = store

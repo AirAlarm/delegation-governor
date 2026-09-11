@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 2,
+    "schemaVersion": 4,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -47,20 +47,25 @@ DEFAULTS: dict[str, Any] = {
             # A separate CPU VM: slow, but contends with nothing.
             "oracle": {"worker": "cc-delegate", "profile": "oracle-coder",
                        "maxWriteJobs": 2, "tier": "oracle"},
+            # A metered cloud lane reached through an explicit cc-delegate
+            # profile. It has its own slot and therefore never waits for
+            # Codex, the local GPU, or Oracle.
+            "openrouter": {"worker": "cc-delegate", "profile": "openrouter-coder",
+                           "maxWriteJobs": 1, "endpoint": "openrouter"},
         },
         # Preferred lanes per task class, best first. A lane that is busy,
         # unavailable or excluded is skipped, so this is a preference, not a
         # pin. Reorder freely -- e.g. put codex first everywhere to keep local
         # models idle while the subscription lasts.
         "classRouting": {
-            "hard": ["codex", "station"],
-            "standard": ["codex", "station", "oracle"],
-            "simple": ["station", "oracle", "codex"],
-            "tiny": ["oracle", "station"],
+            "hard": ["codex", "openrouter", "station"],
+            "standard": ["openrouter", "codex", "station", "oracle"],
+            "simple": ["station", "openrouter", "oracle", "codex"],
+            "tiny": ["oracle", "station", "openrouter"],
         },
         "defaultClass": "standard",
-        "totalWriteJobsPerRepo": 3,
-        "maxReadOnlyJobs": 3,
+        "totalWriteJobsPerRepo": 4,
+        "maxReadOnlyJobs": 4,
         # How long a lane's availability probe is trusted, so dispatch does not
         # re-probe a slow remote every time.
         "laneProbeTtlSeconds": 60,
@@ -68,6 +73,20 @@ DEFAULTS: dict[str, Any] = {
         "slowAfterSeconds": 900,
         "hardTimeoutSeconds": 0,
         "minCheckSpacingSeconds": 60,
+        # Worker-only endpoints are deliberately separate from
+        # supervisorFallbacks: enabling OpenRouter must not silently move the
+        # Claude supervisor onto metered API billing.
+        "endpoints": {
+            "openrouter": {
+                "name": "openrouter",
+                "kind": "openrouter",
+                "baseUrl": "https://openrouter.ai/api",
+                "tokenEnvVar": "OPENROUTER_API_KEY",
+                "tokenFile": "~/.cc-delegate/credentials.json",
+                "tokenFileKey": "OPENROUTER_API_KEY",
+                "probeTimeoutSeconds": 10,
+            },
+        },
     },
     # Ordered local supervisor tiers, tried in turn when Anthropic is out.
     # Tier 1 is the GPU box (fast, but one model slot and only up when the PC
@@ -122,6 +141,11 @@ DEFAULTS: dict[str, Any] = {
         # Start it on demand from the SessionStart hook, so a session never
         # finds a dead ANTHROPIC_BASE_URL.
         "autoStart": True,
+        "tierCacheSeconds": 30,
+        "networkCooldownSeconds": 30,
+        "authCooldownSeconds": 300,
+        "clientPaths": {"cli": "/client/cli", "desktop": "/client/desktop",
+                        "launch": "/client/launch"},
     },
     "overrides": {"supervisor": "auto", "worker": "auto"},
 }
@@ -152,20 +176,49 @@ def load() -> dict[str, Any]:
     except (OSError, ValueError):
         return json.loads(json.dumps(DEFAULTS))
     if int(stored.get("schemaVersion", 1)) < DEFAULTS["schemaVersion"]:
-        _retire(stored)
-        return json.loads(json.dumps(DEFAULTS))
+        stored = _migrate(stored)
     return _merge(DEFAULTS, stored)
 
 
-def _retire(stored: dict) -> None:
+def _migrate(stored: dict) -> dict:
+    """Preserve user choices while translating known legacy capacity keys."""
     import time
-    bak = CONFIG_PATH.with_suffix(f".v{stored.get('schemaVersion', 1)}."
+    old = json.loads(json.dumps(stored))
+    have = int(stored.get("schemaVersion", 1))
+    if have < 2:
+        workers = stored.setdefault("workers", {})
+        lane_cfg = workers.setdefault("lanes", {})
+        if "maxCodexWriteJobs" in workers:
+            lane_cfg.setdefault("codex", {})["maxWriteJobs"] = workers["maxCodexWriteJobs"]
+        if "maxCcDelegateWriteJobs" in workers:
+            lane_cfg.setdefault("station", {})["maxWriteJobs"] = workers[
+                "maxCcDelegateWriteJobs"]
+    if have < 4:
+        workers = stored.setdefault("workers", {})
+        routing = workers.setdefault("classRouting", {})
+        desired = DEFAULTS["workers"]["classRouting"]
+        for task_class, defaults in desired.items():
+            current = routing.get(task_class)
+            if current is None:
+                continue  # deep merge will supply the new default
+            if "openrouter" not in current:
+                # Preserve the user's relative order and place the new lane at
+                # the same preference point used by a fresh v4 config.
+                position = defaults.index("openrouter")
+                current.insert(min(position, len(current)), "openrouter")
+        if workers.get("totalWriteJobsPerRepo") == 3:
+            workers["totalWriteJobsPerRepo"] = 4
+        if workers.get("maxReadOnlyJobs") == 3:
+            workers["maxReadOnlyJobs"] = 4
+    stored["schemaVersion"] = DEFAULTS["schemaVersion"]
+    bak = CONFIG_PATH.with_suffix(f".v{have}."
                                   f"{time.strftime('%Y%m%d-%H%M%S')}.json")
     try:
-        bak.write_text(json.dumps(stored, indent=2), "utf-8")
-        CONFIG_PATH.write_text(json.dumps(DEFAULTS, indent=2), "utf-8")
+        bak.write_text(json.dumps(old, indent=2), "utf-8")
+        CONFIG_PATH.write_text(json.dumps(stored, indent=2), "utf-8")
     except OSError:
         pass
+    return stored
 
 
 def ensure_home() -> Path:

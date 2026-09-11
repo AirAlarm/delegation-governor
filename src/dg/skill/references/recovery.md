@@ -22,32 +22,30 @@ changes - you are still on Anthropic.
 
 ## Anthropic exhausted
 
-`SUP=LOCAL`. Claude Code cannot change backend inside a running process, so
-the switch happens when the session exits:
+`SUP=LOCAL`. Claude Code remains attached to the loopback router; switching is
+performed between requests:
 
-1. the `StopFailure` hook records the hard limit;
-2. you finish or the user quits - no tool call is ever interrupted;
-3. `dg launch` relaunches automatically against LM Studio, resuming the
-   **same session id** with the local model selected explicitly.
+1. the proxy or `StopFailure` hook records the hard limit;
+2. the failed request ends normally;
+3. the next request tries local Qwen, then Oracle if Qwen is unavailable or
+   returns a retryable/malformed-tool-call failure.
 
 The task ledger, running Codex jobs and running cc-delegate jobs all survive:
 they live in the Governor's database and in the workers' own processes, not in
 the session.
 
-If the user started with plain `claude` rather than `dg launch`, there is no
-supervisor to relaunch them - tell them to exit and run `dg launch`.
+Plain `claude` and `dg launch` both use the router after `dg install --proxy`.
 
 ## Anthropic recovers
 
-When the reset passes, the next `dg launch` decision probes Anthropic for
-real and relaunches the same session back on first-party Claude. A timestamp
-passing is never treated as recovery on its own.
+When the reset passes, the router probes Anthropic for real and a later request
+returns to it. A timestamp passing is never treated as recovery on its own.
 
 ## LM Studio unavailable while LOCAL
 
-`dg launch` refuses to start against a dead backend and prints the recovery
-path rather than restart-looping. Options: start LM Studio and load the
-configured model, `dg override supervisor claude`, or `dg probe claude`.
+The router cools down the failed tier and tries Oracle. Options: start LM
+Studio and load the configured model, force Anthropic with
+`dg override supervisor claude`, or inspect `dg proxy --status`.
 
 ## Escape hatches
 
@@ -56,5 +54,5 @@ dg override supervisor claude|local|auto
 dg override worker codex|cc-delegate|auto
 dg clear-override
 dg doctor
-claude                    # stock Claude Code, Governor bypassed entirely
+dg proxy --status
 ```

@@ -26,7 +26,7 @@ E=$(dg add "final review" --mode READ_ONLY --repo . --depends-on $A --depends-on
 
 ## Dependency rules
 
-- A dependency counts as satisfied only when `SUCCEEDED` or `INTEGRATED`.
+- A dependency counts as satisfied only when `INTEGRATED`.
 - A dependency that `FAILED`, `QUOTA_FAILED`, `AUTH_FAILED` or was `CANCELLED`
   blocks its dependants **permanently**. Fix or `dg fallback` the parent; the
   child will not quietly unblock.
@@ -57,6 +57,7 @@ second is still READY and can run alongside it if capacity allows.
 | Limit | Default |
 |---|---|
 | Codex WRITE jobs per repo | 1 |
-| cc-delegate WRITE jobs per repo | 1 |
-| total WRITE jobs per repo | 2 |
+| Station WRITE jobs per repo | 1 |
+| Oracle WRITE jobs per repo | 2 |
+| total WRITE jobs per repo | 3 |
 | READ_ONLY jobs | 3 |

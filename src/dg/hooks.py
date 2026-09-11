@@ -138,9 +138,9 @@ def prompt() -> int:
 def stopfailure() -> int:
     """StopFailure(rate_limit): Anthropic refused the turn.
 
-    Records the hard limit so the supervisor machine can move to LOCAL and
-    later PROBE. It does not switch the backend -- routing is `dg launch`
-    (spec 41).
+    Records the hard limit so the request router moves to LOCAL and later
+    PROBE. The failed request is already over; the next one can safely use a
+    fallback without restarting Claude.
     """
     payload = _stdin_json()
     if str(payload.get("error", "")) != "rate_limit":
@@ -152,8 +152,8 @@ def stopfailure() -> int:
     except Exception:
         return 0
     print("Governor: Anthropic hard rate limit recorded; supervisor -> CLAUDE_LOCAL. "
-          "Restart with `dg launch` to continue on LM Studio, or `dg probe claude` "
-          "once the window resets.", file=sys.stderr)
+          "The next request will try local Qwen, then Oracle; `dg proxy --status` "
+          "shows the route.", file=sys.stderr)
     return 0
 
 
@@ -230,11 +230,7 @@ def _disarm(port: int, path: Path | None = None) -> None:
 def _spawn_proxy(port: int) -> None:
     """Detached, so it outlives the session that started it."""
     import os
-    import shutil
     import subprocess
-    exe = shutil.which("dg")
-    if not exe:
-        return
     kw: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL}
     if os.name == "nt":
@@ -246,7 +242,8 @@ def _spawn_proxy(port: int) -> None:
         kw["start_new_session"] = True
     # The proxy must not inherit a base-URL override pointing at itself.
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_BASE_URL"}
-    subprocess.Popen([exe, "proxy", "--port", str(port)], env=env, **kw)
+    subprocess.Popen([sys.executable, "-m", "dg.cli", "proxy", "--port", str(port)],
+                     env=env, **kw)
 
 
 HOOKS = {"statusline": statusline, "prompt": prompt, "stopfailure": stopfailure,

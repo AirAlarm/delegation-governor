@@ -9,7 +9,8 @@ statusline payload carries
 
 built from the `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}`
 response headers. `utilization` is 0-100; `resets_at` is unix seconds. Both
-windows are absent until the first successful API response, so absence is
+The raw utilization is a 0..1 fraction and is normalized below. Both windows
+are absent until the first successful API response, so absence is
 normal and must never read as 0%.
 """
 from __future__ import annotations
@@ -108,6 +109,8 @@ def evaluate(con: sqlite3.Connection, cfg: dict) -> dict[str, Any]:
         reason = f"quota {int(age)}s stale, holding {state}"
     else:
         state, reason = _from_thresholds(five, seven, scfg)
+        if state == LOCAL and _threshold_reset_due(five, seven, scfg, now):
+            state, reason = PROBE, "quota threshold reset time passed, probing"
 
     effective = state
     if override == "claude":
@@ -144,6 +147,14 @@ def _from_thresholds(five, seven, scfg) -> tuple[str, str]:
 def _soonest_reset(five, seven) -> int | None:
     vals = [w["resetsAt"] for w in (five, seven) if w and w.get("resetsAt")]
     return min(vals) if vals else None
+
+
+def _threshold_reset_due(five, seven, scfg, now: float) -> bool:
+    governing = []
+    for win, key in ((five, "fiveHour"), (seven, "sevenDay")):
+        if win and win["usedPercent"] >= scfg[key]["local"]:
+            governing.append(win.get("resetsAt"))
+    return bool(governing) and all(reset is not None and reset <= now for reset in governing)
 
 
 def clear_hard_limit(con: sqlite3.Connection) -> None:

@@ -1,56 +1,33 @@
-"""`dg proxy` -- a local router that gives Desktop the failover it cannot get
-from a process relaunch.
+"""Loopback Anthropic-compatible router for Claude Code and Desktop.
 
-Why this exists
----------------
-`dg launch` switches backends by restarting Claude Code. The Claude Desktop app
-spawns its own bundled `claude.exe`, so nothing outside can wrap it: measured on
-2026-09-05, Desktop never invokes the statusLine hook and cannot be relaunched
-by us. A per-request router is the only mechanism that works there.
-
-Why it is a router and not a translator
----------------------------------------
-All three backends already speak the Anthropic Messages API -- Anthropic itself,
-LM Studio natively, and the Oracle gateway. So this forwards bytes; it does not
-convert protocols. That is what keeps it ~200 lines instead of a second product.
-
-Credentials
------------
-Verified live: Claude Code sends its subscription OAuth token to a custom
-`ANTHROPIC_BASE_URL` (`Authorization: Bearer sk-ant-oat01...`). For Anthropic
-traffic this proxy passes that header through **verbatim and unread** -- it is
-never logged, parsed or stored. For a fallback tier the header is replaced with
-that tier's own key, so the OAuth token never leaves the machine except to
-Anthropic itself.
-
-The proxy binds to loopback only.
+The client may display its selected Claude model, but the Governor selects the
+real upstream per request. OAuth credentials are forwarded only to Anthropic.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import secrets
 import socket
 import ssl
 import sys
 import threading
 import time
-from http.client import HTTPConnection, HTTPSConnection
+import uuid
+from http.client import HTTPConnection, HTTPSConnection, HTTPResponse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from . import config, launcher, store, supervisor
+from .version import VERSION
 
 ANTHROPIC_HOST = "api.anthropic.com"
-
-# Hop-by-hop headers must not be forwarded (RFC 7230 6.1); Host and
-# Content-Length are recomputed per upstream.
 _DROP = {"host", "content-length", "connection", "keep-alive", "proxy-authenticate",
          "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
          "accept-encoding"}
-
-# Anthropic returns quota on every response. Capturing it here is what restores
-# SAVE mode in Desktop, where no statusline hook ever runs.
 _RL = {"anthropic-ratelimit-unified-5h-utilization": ("fiveHour", "usedPercent"),
        "anthropic-ratelimit-unified-5h-reset": ("fiveHour", "resetsAt"),
        "anthropic-ratelimit-unified-7d-utilization": ("sevenDay", "usedPercent"),
@@ -58,55 +35,43 @@ _RL = {"anthropic-ratelimit-unified-5h-utilization": ("fiveHour", "usedPercent")
 
 
 class Router:
-    """Decides the upstream for each request and records what it learns."""
-
     def __init__(self, cfg: dict, reload: bool = True):
-        self.cfg = cfg
-        # Re-read config per request so edits take effect without a restart.
-        # Off when the caller owns the config (tests, embedded use).
-        self.reload = reload
+        self.cfg, self.reload = cfg, reload
         self.lock = threading.Lock()
-        # One SQLite connection per handler thread: connections are
-        # thread-bound, and ThreadingHTTPServer serves each request on its own.
-        self._local = threading.local()
-        self._tier_cache: tuple[float, dict | None] = (0.0, None)
         self.stats: dict[str, int] = {}
+        self.cooldowns: dict[str, tuple[float, str]] = {}
+        self.last: dict[str, Any] = {}
+        self.instance_id, self.started_at = str(uuid.uuid4()), time.time()
 
-    @property
-    def con(self):
-        con = getattr(self._local, "con", None)
-        if con is None:
-            con = self._local.con = store.connect()
-        return con
+    def _config_and_state(self) -> tuple[dict, dict]:
+        cfg = config.load() if self.reload else self.cfg
+        with store.session() as con:
+            saved = store.kv_get(con, "overrides") or {}
+            cfg["overrides"].update({k: v for k, v in saved.items() if v})
+            state = supervisor.evaluate(con, cfg)
+        self.cfg = cfg
+        return cfg, state
+
+    def fallbacks(self) -> list[dict]:
+        now = time.time()
+        return [t for t in launcher.tiers(self.cfg)
+                if self.cooldowns.get(t["name"], (0, ""))[0] <= now]
+
+    def candidates(self) -> tuple[list[tuple[str, dict | None]], str, str]:
+        _, state = self._config_and_state()
+        tiers = [("tier", t) for t in self.fallbacks()]
+        if state["state"] == supervisor.LOCAL:
+            return tiers, state["reason"], state["state"]
+        return [("anthropic", None), *tiers], state["reason"], state["state"]
 
     def route(self) -> tuple[str, dict | None, str]:
-        """('anthropic'|'tier', tier, reason)."""
-        cfg = config.load() if self.reload else self.cfg
-        saved = store.kv_get(self.con, "overrides") or {}
-        cfg["overrides"].update({k: v for k, v in saved.items() if v})
-        self.cfg = cfg
-        d = launcher.decide_route(self.con, cfg, probe=False)
-        if d["route"] == launcher.ANTHROPIC:
-            return "anthropic", None, d["reason"]
-        t = self._pick_tier()
-        if t is None:
-            # Nothing local answered: Anthropic is still the best try, and its
-            # own error is more useful to the user than one we invent.
-            return "anthropic", None, "no fallback tier answered; trying anthropic"
-        return "tier", t, d["reason"]
-
-    def _pick_tier(self) -> dict | None:
-        """First usable tier, cached briefly so we do not probe every request."""
-        age, cached = self._tier_cache
-        if cached is not None and time.time() - age < 30:
-            return cached
-        with self.lock:
-            t, _ = launcher.first_usable_tier(self.cfg)
-            self._tier_cache = (time.time(), t)
-        return t
+        candidates, reason, _ = self.candidates()
+        if not candidates:
+            return "tier", None, "no fallback tier available"
+        kind, tier = candidates[0]
+        return kind, tier, reason
 
     def record_quota(self, headers) -> None:
-        """Harvest Anthropic's rate-limit headers. Zero cost, no inference."""
         got: dict[str, dict[str, float]] = {}
         for name, (window, field) in _RL.items():
             raw = headers.get(name)
@@ -116,53 +81,69 @@ class Router:
                 got.setdefault(window, {})[field] = float(raw)
             except (TypeError, ValueError):
                 pass
-        if not got:
-            return
         payload = {"rate_limits": {}}
         for window, key in (("fiveHour", "five_hour"), ("sevenDay", "seven_day")):
             w = got.get(window)
             if w and "usedPercent" in w:
-                # Raw header value: a 0..1 fraction. supervisor._window owns
-                # the conversion so there is exactly one place that knows.
                 payload["rate_limits"][key] = {
                     "utilization": w["usedPercent"],
                     "resets_at": int(w.get("resetsAt", 0)) or None}
         if payload["rate_limits"]:
-            supervisor.ingest_statusline(self.con, payload)
+            with store.session() as con:
+                supervisor.ingest_statusline(con, payload)
 
-    def note_hard_limit(self, status: int, body_head: bytes) -> None:
-        """A 429 from Anthropic is the hard limit the StopFailure hook records
-        in a terminal session. In Desktop this is where we learn it."""
-        if status != 429:
-            return
-        supervisor.record_hard_limit(self.con, "rate_limit",
-                                     body_head[:200].decode("utf-8", "replace"))
+    def note_anthropic(self, status: int, body: bytes, was_probe: bool = False) -> None:
+        with store.session() as con:
+            if status == 429:
+                supervisor.record_hard_limit(
+                    con, "rate_limit", body[:200].decode("utf-8", "replace"))
+            elif 200 <= status < 300 and was_probe:
+                supervisor.clear_hard_limit(con)
+
+    def note_hard_limit(self, status: int, body: bytes) -> None:
+        """Backward-compatible name used by older integrations/tests."""
+        self.note_anthropic(status, body)
+
+    def cooldown(self, tier: dict, reason: str, auth: bool = False) -> None:
+        key = "authCooldownSeconds" if auth else "networkCooldownSeconds"
+        default = 300 if auth else 30
+        seconds = self.cfg.get("proxy", {}).get(key, default)
+        with self.lock:
+            self.cooldowns[tier["name"]] = (time.time() + seconds, reason)
 
     def bump(self, key: str) -> None:
         with self.lock:
             self.stats[key] = self.stats.get(key, 0) + 1
 
+    def observed(self, client: str, kind: str, tier: dict | None, status: int,
+                 outcome: str) -> None:
+        with self.lock:
+            self.last = {"at": time.time(), "client": client, "route": kind,
+                         "tier": (tier or {}).get("name"), "status": status,
+                         "outcome": outcome}
 
-def _debug(msg: str) -> None:
-    """Diagnostics only, never headers: those carry credentials."""
-    try:
-        with open(os.environ["DG_PROXY_DEBUG"], "a", encoding="utf-8") as fh:
-            fh.write(msg + chr(10))
-    except OSError:
-        pass
+    def snapshot(self) -> dict[str, Any]:
+        _, state = self._config_and_state()
+        now = time.time()
+        with self.lock:
+            cooldowns = {k: {"remainingSeconds": max(0, int(v[0] - now)), "reason": v[1]}
+                         for k, v in self.cooldowns.items() if v[0] > now}
+            return {"ok": True, "version": VERSION, "pid": os.getpid(),
+                    "instanceId": self.instance_id, "startedAt": self.started_at,
+                    "supervisor": state["state"], "reason": state["reason"],
+                    "stats": dict(self.stats), "last": dict(self.last),
+                    "cooldowns": cooldowns}
 
 
 def _connect(base_url: str):
     parts = urlsplit(base_url)
-    host, port = parts.hostname, parts.port
     if parts.scheme == "https":
-        ctx = ssl.create_default_context()
-        return HTTPSConnection(host, port or 443, timeout=900, context=ctx), parts.path.rstrip("/")
-    return HTTPConnection(host, port or 80, timeout=900), parts.path.rstrip("/")
+        return (HTTPSConnection(parts.hostname, parts.port or 443, timeout=900,
+                                context=ssl.create_default_context()), parts.path.rstrip("/"))
+    return HTTPConnection(parts.hostname, parts.port or 80, timeout=900), parts.path.rstrip("/")
 
 
 def _rewrite_body(body: bytes, model: str) -> bytes:
-    """Point the request at the tier's own model name."""
     if not body:
         return body
     try:
@@ -175,21 +156,58 @@ def _rewrite_body(body: bytes, model: str) -> bytes:
     return body
 
 
+def _retryable(kind: str, status: int, body: bytes) -> bool:
+    malformed = b"failed to generate a valid tool call" in body[:10000].lower()
+    if kind == "anthropic":
+        return status in (408, 429) or status >= 500
+    return malformed or status in (401, 403, 408, 429) or status >= 500
+
+
+def _client_path(path: str, cfg: dict) -> tuple[str, str]:
+    for client, prefix in cfg.get("proxy", {}).get("clientPaths", {}).items():
+        if path == prefix or path.startswith(prefix + "/"):
+            return client, path[len(prefix):] or "/"
+    return "legacy", path
+
+
+def _token(create: bool = False) -> str | None:
+    token_file = config.HOME / "proxy.token"
+    try:
+        return token_file.read_text("utf-8").strip()
+    except OSError:
+        if not create:
+            return None
+    config.ensure_home()
+    value = secrets.token_urlsafe(32)
+    token_file.write_text(value, "utf-8")
+    try:
+        os.chmod(token_file, 0o600)
+    except OSError:
+        pass
+    return value
+
+
 def make_handler(router: Router):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "dg-proxy"
 
-        def do_POST(self):
-            self._proxy()
-
         def do_GET(self):
             if self.path == "/__dg/health":
-                return self._json({"ok": True, "stats": router.stats,
-                                   "route": router.route()[0]})
+                return self._json(router.snapshot())
             self._proxy()
 
-        # -- plumbing ----------------------------------------------------
+        def do_POST(self):
+            if self.path == "/__dg/shutdown":
+                expected = _token(False) or ""
+                supplied = self.headers.get("x-dg-admin-token") or ""
+                if not expected or not hmac.compare_digest(expected, supplied):
+                    return self._json({"ok": False, "error": "forbidden"}, 403)
+                self._json({"ok": True, "stopping": True})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
+            self._proxy()
+
         def _json(self, obj: dict[str, Any], status: int = 200) -> None:
             body = json.dumps(obj).encode()
             self.send_response(status)
@@ -200,116 +218,143 @@ def make_handler(router: Router):
 
         def _proxy(self):
             body = self.rfile.read(int(self.headers.get("content-length") or 0))
-            kind, tier, reason = router.route()
+            client, path = _client_path(self.path, router.cfg)
+            candidates, _, state = router.candidates()
+            if not candidates:
+                return self._json({"type": "error", "error": {"type": "api_error",
+                    "message": "dg proxy: local mode is active and no fallback tier is available"}}, 503)
+            failures: list[str] = []
+            for index, (kind, tier) in enumerate(candidates):
+                if kind == "tier" and tier.get("kind") == "lmstudio":
+                    ok, detail = launcher.probe_tier(tier, load=True)
+                    if not ok:
+                        router.cooldown(tier, detail)
+                        failures.append(f"{tier['name']}: {detail}")
+                        continue
+                base = "https://" + ANTHROPIC_HOST if kind == "anthropic" else tier["baseUrl"]
+                out = body if kind == "anthropic" else _rewrite_body(body, tier["model"])
+                router.bump("anthropic" if kind == "anthropic" else tier["name"])
+                conn = None
+                try:
+                    conn, prefix = _connect(base)
+                    conn.request(self.command, prefix + path, body=out,
+                                 headers=self._headers(tier if kind == "tier" else None))
+                    resp = conn.getresponse()
+                except (OSError, ssl.SSLError, socket.timeout) as e:
+                    if tier:
+                        router.cooldown(tier, type(e).__name__)
+                    failures.append(f"{(tier or {}).get('name', 'anthropic')}: {type(e).__name__}")
+                    if conn:
+                        conn.close()
+                    continue
+                is_error = resp.status >= 400
+                error_body = resp.read() if is_error else b""
+                if kind == "anthropic":
+                    router.record_quota(resp.headers)
+                    router.note_anthropic(resp.status, error_body,
+                                          was_probe=state == supervisor.PROBE)
+                retry = is_error and _retryable(kind, resp.status, error_body)
+                if retry and index + 1 < len(candidates):
+                    if tier:
+                        router.cooldown(tier, f"HTTP {resp.status}",
+                                        auth=resp.status in (401, 403))
+                    failures.append(f"{(tier or {}).get('name', 'anthropic')}: HTTP {resp.status}")
+                    conn.close()
+                    continue
+                router.observed(client, kind, tier, resp.status,
+                                "served" if not failures else "served-after-retry")
+                return self._send_upstream(resp, conn, error_body if is_error else None)
+            router.observed(client, "none", None, 503, "all-fallbacks-failed")
+            return self._json({"type": "error", "error": {"type": "api_error",
+                "message": "dg proxy: all eligible upstreams failed: " + "; ".join(failures)}}, 503)
 
-            if kind == "anthropic":
-                base, headers, out = "https://" + ANTHROPIC_HOST, self._headers(), body
-                router.bump("anthropic")
-            else:
-                base = tier["baseUrl"]
-                headers = self._headers(tier)
-                out = _rewrite_body(body, tier["model"])
-                router.bump(tier["name"])
-
-            try:
-                conn, prefix = _connect(base)
-                conn.request(self.command, prefix + self.path, body=out, headers=headers)
-                resp = conn.getresponse()
-            except (OSError, ssl.SSLError, socket.timeout) as e:
-                return self._json({"type": "error", "error": {
-                    "type": "api_error",
-                    "message": f"dg proxy: upstream {base} unreachable ({type(e).__name__})"}},
-                    502)
-
-            if kind == "anthropic":
-                router.record_quota(resp.headers)
-            if os.environ.get("DG_PROXY_DEBUG"):
-                _debug(f"{kind}/{(tier or {}).get('name','-')} -> {resp.status} "
-                       f"ct={resp.getheader('content-type')} "
-                       f"te={resp.getheader('transfer-encoding')} "
-                       f"cl={resp.getheader('content-length')}")
-
+        def _send_upstream(self, resp: HTTPResponse, conn, buffered: bytes | None) -> None:
             self.send_response(resp.status)
             streaming = False
             for k, v in resp.getheaders():
                 lk = k.lower()
                 if lk in ("connection", "keep-alive", "transfer-encoding", "content-length"):
-                    if lk == "content-length":
-                        self.send_header(k, v)
                     continue
                 if lk == "content-type" and "event-stream" in v.lower():
                     streaming = True
                 self.send_header(k, v)
-            if streaming or resp.getheader("content-length") is None:
+            if buffered is not None:
+                self.send_header("content-length", str(len(buffered)))
+            elif resp.getheader("content-length") is not None and not streaming:
+                self.send_header("content-length", resp.getheader("content-length"))
+            else:
                 self.send_header("transfer-encoding", "chunked")
             self.end_headers()
-
-            first = b""
             try:
+                if buffered is not None:
+                    self.wfile.write(buffered)
+                    return
+                chunked = streaming or resp.getheader("content-length") is None
                 while True:
                     chunk = resp.read(8192)
                     if not chunk:
                         break
-                    if not first:
-                        first = chunk
-                    if streaming or resp.getheader("content-length") is None:
-                        self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
-                    else:
-                        self.wfile.write(chunk)
+                    self.wfile.write((b"%x\r\n%s\r\n" % (len(chunk), chunk)) if chunked else chunk)
                     self.wfile.flush()
-                if streaming or resp.getheader("content-length") is None:
+                if chunked:
                     self.wfile.write(b"0\r\n\r\n")
             except (BrokenPipeError, ConnectionResetError):
                 pass
             finally:
                 conn.close()
-            if os.environ.get("DG_PROXY_DEBUG"):
-                _debug(f"  first 200B: {first[:200]!r}")
-            if kind == "anthropic":
-                router.note_hard_limit(resp.status, first)
 
         def _headers(self, tier: dict | None = None) -> dict[str, str]:
             out = {k: v for k, v in self.headers.items() if k.lower() not in _DROP}
             if tier is None:
-                # Anthropic: the client's own OAuth header passes through
-                # verbatim. It is never read, logged or stored.
                 out["Host"] = ANTHROPIC_HOST
                 return out
-            # A fallback tier gets its own key; the OAuth token stops here.
             for k in list(out):
                 if k.lower() in ("authorization", "x-api-key", "anthropic-beta"):
                     out.pop(k)
             tok = launcher.tier_token(tier)
             if tok:
-                out["Authorization"] = f"Bearer {tok}"
-                out["x-api-key"] = tok
+                out["Authorization"], out["x-api-key"] = f"Bearer {tok}", tok
             out["anthropic-version"] = "2023-06-01"
             out["Host"] = urlsplit(tier["baseUrl"]).netloc
             return out
 
-        def log_message(self, *a):
-            pass  # never log request lines: they carry paths and tokens
+        def log_message(self, *args):
+            pass
 
         def handle_one_request(self):
-            # A client that hangs up mid-request is normal (Ctrl-C, timeout);
-            # it must not spray a stack trace over the proxy's log.
             try:
                 super().handle_one_request()
             except (ConnectionResetError, BrokenPipeError, TimeoutError):
                 self.close_connection = True
-
     return Handler
+
+
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    """A router port has exactly one owner, including on Windows.
+
+    Windows can otherwise allow several Python listeners on the same loopback
+    port, distributing requests between old and new releases. That makes an
+    upgrade appear intermittently unhealthy and, worse, leaves routing policy
+    nondeterministic.
+    """
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        return super().server_bind()
 
 
 def serve(cfg: dict, port: int | None = None) -> int:
     port = port or cfg.get("proxy", {}).get("port", 8787)
+    _token(True)
     router = Router(cfg)
-    srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(router))
+    srv = ExclusiveThreadingHTTPServer(("127.0.0.1", port), make_handler(router))
     srv.daemon_threads = True
-    store.kv_set(store.connect(), "proxy", {"port": port, "startedAt": time.time()})
+    with store.session() as con:
+        store.kv_set(con, "proxy", {"port": port, "startedAt": time.time(),
+                                    "pid": os.getpid(), "instanceId": router.instance_id})
     print(f"dg proxy: listening on http://127.0.0.1:{port} (loopback only)", file=sys.stderr)
-    print(f"dg proxy: set ANTHROPIC_BASE_URL=http://127.0.0.1:{port} for Claude Code",
-          file=sys.stderr)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -320,12 +365,25 @@ def serve(cfg: dict, port: int | None = None) -> int:
 
 
 def health(port: int, timeout: float = 2.0) -> dict[str, Any] | None:
-    """Is a dg proxy already listening there?"""
     import urllib.error
     import urllib.request
     try:
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/__dg/health", timeout=timeout) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/__dg/health", timeout=timeout) as r:
             return json.loads(r.read())
     except (urllib.error.URLError, OSError, ValueError):
         return None
+
+
+def stop(port: int, timeout: float = 5.0) -> dict[str, Any]:
+    import urllib.error
+    import urllib.request
+    token = _token(False)
+    if not token:
+        return {"ok": False, "error": "proxy admin token is missing"}
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/__dg/shutdown", data=b"{}",
+                                 method="POST", headers={"x-dg-admin-token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return {"ok": False, "error": str(e)}

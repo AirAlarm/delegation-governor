@@ -13,7 +13,7 @@ The `dg` CLI holds the state. Read it, don't remember it.
 
 ```
 PLAN -> LEDGER -> DISPATCH -> DON'T WAIT -> OTHER READY WORK
-     -> COLLECT -> UNBLOCK -> REVIEW -> INTEGRATE -> REPEAT
+     -> COLLECT -> REVIEW -> MERGE/CHERRY-PICK -> INTEGRATE -> UNBLOCK -> REPEAT
 ```
 
 ## Rules that matter most
@@ -28,9 +28,10 @@ PLAN -> LEDGER -> DISPATCH -> DON'T WAIT -> OTHER READY WORK
    ambiguity, dangerous changes, final review: yours. See `references/rubric.md`.
 5. **Bounded work orders only.** Never paste conversation history to a worker.
    `dg workorder <id>` renders the contract; the worker reads the repo itself.
-6. **Classify tasks and fill every lane.** Codex, the GPU box and the VM are
-   three separate machines. `--class tiny|simple|standard|hard` decides which
-   one; `dg fill` puts work in all of them instead of one at a time.
+6. **Classify tasks and fill every lane.** Codex, the GPU box, the VM, and
+   OpenRouter are four independent endpoints. `--class
+   tiny|simple|standard|hard` decides preference; `dg fill` puts work in all
+   available lanes instead of one at a time.
 
 ## Minimum commands
 

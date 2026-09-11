@@ -19,10 +19,12 @@ class TestDependencies(DGTest):
         self.assertEqual(st[a], "RUNNING")
         self.assertEqual(st[c], "BLOCKED")
 
-    def test_dependant_becomes_ready_on_success(self):
+    def test_dependant_waits_for_integration(self):
         a = self.task("a")
         c = self.task("c", deps=[a], paths=["docs/**"])
         store.set_status(self.con, a, "SUCCEEDED")
+        self.assertEqual(self.states()[c], "BLOCKED")
+        store.set_status(self.con, a, "INTEGRATED")
         self.assertEqual(self.states()[c], "READY")
 
     def test_integrated_also_satisfies(self):
@@ -54,12 +56,12 @@ class TestDependencies(DGTest):
         self.assertEqual([st[a], st[b], st[d]], ["READY"] * 3)
         self.assertEqual([st[c], st[e]], ["BLOCKED"] * 2)
 
-        store.set_status(self.con, a, "SUCCEEDED")
+        store.set_status(self.con, a, "INTEGRATED")
         st = self.states()
         self.assertEqual(st[c], "READY")
         self.assertEqual(st[e], "BLOCKED")  # still waiting on C
 
-        store.set_status(self.con, c, "SUCCEEDED")
+        store.set_status(self.con, c, "INTEGRATED")
         self.assertEqual(self.states()[e], "READY")
 
     def test_missing_dependency_blocks(self):
@@ -130,6 +132,7 @@ class TestCapacity(DGTest):
         self.assertIn("write capacity", rows[c]["reason"])
 
     def test_read_only_capacity(self):
+        self.cfg["workers"]["maxReadOnlyJobs"] = 3  # pin the behavior, not the default
         ids = [self.task(f"r{i}", mode="READ_ONLY") for i in range(4)]
         for i in ids[:3]:
             store.set_status(self.con, i, "RUNNING")
