@@ -634,6 +634,22 @@ def cmd_doctor(args) -> int:
             # without saying why, so it is a warning, not a footnote.
             warn("cc-delegate station patch", detail)
 
+        value, ok_timeout = ccdelegate.stall_timeout_state()
+        if value is None:
+            warn("cc-delegate stall timeout",
+                 f"{ccdelegate.STALL_TIMEOUT_ENV} not set (cc-delegate default: "
+                 f"{ccdelegate.STALL_TIMEOUT_DEFAULT}s) -- too tight for Oracle's "
+                 "CPU-only inference; verified live, it killed genuinely-in-progress "
+                 f"runs. Set it to {ccdelegate.STALL_TIMEOUT_RECOMMENDED} as a "
+                 "persistent user env var, then restart the session.")
+        elif not ok_timeout:
+            warn("cc-delegate stall timeout",
+                 f"{ccdelegate.STALL_TIMEOUT_ENV}={value}s, below the recommended "
+                 f"{ccdelegate.STALL_TIMEOUT_RECOMMENDED}s for Oracle")
+        else:
+            chk("cc-delegate stall timeout", True,
+                f"{ccdelegate.STALL_TIMEOUT_ENV}={value}s")
+
     sup = supervisor.evaluate(con, cfg)
     chk("claude quota data", sup["fiveHour"] is not None or sup["sevenDay"] is not None,
         "none yet -- install the statusline hook and start a session"

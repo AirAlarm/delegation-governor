@@ -7,6 +7,7 @@ tests pin the detection that makes that visible instead of mysterious.
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 from base import DGTest
 
@@ -88,3 +89,43 @@ class TestDetection(DGTest):
     def test_apply_on_absent_plugin_is_a_no_op(self):
         ccdelegate.plugin_dir = lambda: None
         self.assertEqual(ccdelegate.apply()["state"], "absent")
+
+
+class TestStallTimeout(DGTest):
+    """DELEGATE_STALL_TIMEOUT_S: verified live 2026-09-11, cc-delegate's 300s
+    default kills genuinely-in-progress runs on Oracle's CPU-only inference,
+    well short of the real 30-minute run timeout."""
+
+    def _reg_result(self, stdout: str, returncode: int = 0):
+        return lambda args, **kw: type(
+            "R", (), {"returncode": returncode, "stdout": stdout, "stderr": ""})()
+
+    def test_unset_is_not_ok(self):
+        with mock.patch.object(ccdelegate.subprocess, "run", self._reg_result("", 1)):
+            value, ok = ccdelegate.stall_timeout_state()
+        self.assertIsNone(value)
+        self.assertFalse(ok)
+
+    def test_below_recommended_is_not_ok(self):
+        with mock.patch.object(
+                ccdelegate.subprocess, "run",
+                self._reg_result("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    300")):
+            value, ok = ccdelegate.stall_timeout_state()
+        self.assertEqual(value, 300)
+        self.assertFalse(ok)
+
+    def test_at_recommended_is_ok(self):
+        with mock.patch.object(
+                ccdelegate.subprocess, "run",
+                self._reg_result("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    900")):
+            value, ok = ccdelegate.stall_timeout_state()
+        self.assertEqual(value, 900)
+        self.assertTrue(ok)
+
+    def test_malformed_value_is_treated_as_unset(self):
+        with mock.patch.object(
+                ccdelegate.subprocess, "run",
+                self._reg_result("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    not-a-number")):
+            value, ok = ccdelegate.stall_timeout_state()
+        self.assertIsNone(value)
+        self.assertFalse(ok)

@@ -97,6 +97,45 @@ def apply() -> dict[str, Any]:
                     "imports the gate at startup and caches it"}
 
 
+STALL_TIMEOUT_ENV = "DELEGATE_STALL_TIMEOUT_S"
+# cc-delegate's own default (server/config.py) -- fine for the fast local GPU
+# box, too tight for Oracle's CPU-only inference: verified live 2026-09-11,
+# it killed two genuinely-in-progress runs nowhere near the real 30-minute
+# run timeout, because a single model call there legitimately takes minutes.
+STALL_TIMEOUT_DEFAULT = 300
+STALL_TIMEOUT_RECOMMENDED = 900
+
+
+def stall_timeout_state() -> tuple[int | None, bool]:
+    """(persisted DELEGATE_STALL_TIMEOUT_S, whether it meets the recommended floor).
+
+    Reads the *persisted* value (registry on Windows, else the ambient
+    environment) -- what a freshly spawned cc-delegate MCP server will
+    inherit, not necessarily what this already-running dg process happened
+    to start with. Mirrors install.proxy_env_state's approach for the same
+    reason: a `setx`/SetEnvironmentVariable change doesn't reach an already-
+    running process's os.environ.
+    """
+    if os.name != "nt":
+        raw = os.environ.get(STALL_TIMEOUT_ENV)
+    else:
+        try:
+            out = subprocess.run(
+                ["reg", "query", r"HKCU\Environment", "/v", STALL_TIMEOUT_ENV],
+                capture_output=True, text=True)
+        except OSError:
+            out = None
+        raw = None
+        if out is not None and out.returncode == 0:
+            parts = out.stdout.split("REG_SZ")
+            raw = parts[-1].strip() if len(parts) > 1 else None
+    try:
+        value = int(raw) if raw else None
+    except ValueError:
+        value = None
+    return value, bool(value and value >= STALL_TIMEOUT_RECOMMENDED)
+
+
 def gate_settings() -> dict[str, Any]:
     """The tuning values, read from the shipped gate rather than hardcoded."""
     out: dict[str, Any] = {}
