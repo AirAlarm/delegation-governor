@@ -17,7 +17,11 @@ class LaneTest(DGTest):
         self.avail = {"codex": [True, "ok"], "station": [True, "ok"],
                       "oracle": [True, "ok"], "openrouter": [True, "ok"],
                       "opencode-fast": [True, "ok"], "opencode-main": [True, "ok"],
-                      "opencode-smart": [True, "ok"]}
+                      "opencode-smart": [True, "ok"],
+                      "opencode-fast-fallback": [True, "ok"],
+                      "opencode-main-fallback": [True, "ok"],
+                      "opencode-smart-fallback": [True, "ok"],
+                      "opencode-bulk": [True, "ok"], "opencode-reviewer": [True, "ok"]}
         lanes.availability = lambda con, cfg, refresh=True: self.avail
 
     def task(self, title="t", mode="WRITE", deps=(), paths=(), repo="/repo",
@@ -82,12 +86,12 @@ class TestFallThrough(LaneTest):
         self.assertIn("codex: CODEX_EXHAUSTED", out["skipped"])
 
     def test_no_lane_left_is_reported_not_guessed(self):
-        for lane in ("codex", "opencode-main", "station"):
+        for lane in ("codex", "opencode-main", "opencode-main-fallback", "station"):
             self.avail[lane] = [False, "down"]
         out = self.choose(self.task())
         self.assertIsNone(out["lane"])
         self.assertIn("no lane available", out["reason"])
-        self.assertEqual(len(out["skipped"]), 3)
+        self.assertEqual(len(out["skipped"]), 4)
 
     def test_hard_uses_opencode_smart_before_the_local_gpu(self):
         self.avail["codex"] = [False, "down"]
@@ -99,6 +103,7 @@ class TestFallThrough(LaneTest):
         so a total outage of codex/opencode-smart/station leaves nothing left."""
         self.avail["codex"] = [False, "down"]
         self.avail["opencode-smart"] = [False, "down"]
+        self.avail["opencode-smart-fallback"] = [False, "down"]
         self.avail["station"] = [False, "down"]
         self.assertIsNone(self.choose(self.task(task_class="hard"))["lane"])
 
@@ -165,12 +170,14 @@ class TestFourLaneConcurrency(LaneTest):
         self.assertEqual(placed[hard], "codex")
         self.assertEqual(placed[standard], "opencode-main")
         self.assertEqual(placed[simple], "opencode-fast")
-        self.assertEqual(placed[tiny], "station")
+        # tiny's own fallback (opencode-fast-fallback) beats falling back to
+        # the now-deprecated-for-local-first station.
+        self.assertEqual(placed[tiny], "opencode-fast-fallback")
         self.assertEqual(len(set(placed.values())), 4, "all four must be distinct lanes")
 
         counts = lanes.in_flight(self.con, "/repo")
-        self.assertEqual(counts, {"codex": 1, "opencode-main": 1, "station": 1,
-                                  "opencode-fast": 1})
+        self.assertEqual(counts, {"codex": 1, "opencode-main": 1,
+                                  "opencode-fast": 1, "opencode-fast-fallback": 1})
 
     def test_a_fifth_task_waits(self):
         for cls, paths in (("hard", "a/**"), ("standard", "b/**"),

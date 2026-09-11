@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 9,
+    "schemaVersion": 10,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -76,6 +76,39 @@ DEFAULTS: dict[str, Any] = {
                               "maxWriteJobs": 1, "endpoint": "opencode"},
             "opencode-smart": {"worker": "cc-delegate", "profile": "opencode-smart",
                                "maxWriteJobs": 1, "endpoint": "opencode"},
+            # One verified-working fallback per tier, wired directly into
+            # classRouting right after its primary (see below) so the
+            # existing fallthrough mechanism handles it -- no new routing
+            # logic needed. Deliberately a *different* model family from its
+            # primary where possible, so a rate limit on one doesn't also
+            # affect the other's independent budget.
+            "opencode-main-fallback": {"worker": "cc-delegate",
+                                       "profile": "opencode-main-fallback",
+                                       "maxWriteJobs": 1, "endpoint": "opencode"},
+            "opencode-smart-fallback": {"worker": "cc-delegate",
+                                        "profile": "opencode-smart-fallback",
+                                        "maxWriteJobs": 1, "endpoint": "opencode"},
+            "opencode-fast-fallback": {"worker": "cc-delegate",
+                                       "profile": "opencode-fast-fallback",
+                                       "maxWriteJobs": 1, "endpoint": "opencode"},
+            # Two more lanes, deliberately NOT wired into classRouting below --
+            # they're for explicit/manual dispatch (pass profile="opencode-
+            # bulk"/"opencode-reviewer" directly to cc-delegate's run_dev_task)
+            # rather than the automatic tiny/simple/standard/hard chain, so
+            # they don't dilute those tiers' own budgets.
+            #   - opencode-bulk: deepseek-v4.1-flash, its own independent
+            #     32,500 req/mo budget separate from opencode-fast's, for
+            #     high-volume/simulation-style work that would otherwise eat
+            #     into routine tiny/simple traffic.
+            #   - opencode-reviewer: qwen3.8-max, a distinct model from every
+            #     coding tier, reserved for READ_ONLY final-review work --
+            #     verified working but the tightest limit on the whole plan
+            #     (~810 req/mo), acceptable since review happens far less
+            #     often than active coding.
+            "opencode-bulk": {"worker": "cc-delegate", "profile": "opencode-bulk",
+                              "maxWriteJobs": 1, "endpoint": "opencode"},
+            "opencode-reviewer": {"worker": "cc-delegate", "profile": "opencode-reviewer",
+                                  "maxWriteJobs": 1, "endpoint": "opencode"},
         },
         # Preferred lanes per task class, best first. A lane that is busy,
         # unavailable or excluded is skipped, so this is a preference, not a
@@ -109,10 +142,10 @@ DEFAULTS: dict[str, Any] = {
             # opencode-fast is occupied, not the leader. codex still stays
             # last/absent for these classes so trivial work doesn't eat the
             # Codex slot -- see test_simple_prefers_opencode_over_codex.
-            "hard": ["codex", "opencode-smart", "station"],
-            "standard": ["codex", "opencode-main", "station"],
-            "simple": ["opencode-fast", "station", "codex"],
-            "tiny": ["opencode-fast", "station"],
+            "hard": ["codex", "opencode-smart", "opencode-smart-fallback", "station"],
+            "standard": ["codex", "opencode-main", "opencode-main-fallback", "station"],
+            "simple": ["opencode-fast", "opencode-fast-fallback", "station", "codex"],
+            "tiny": ["opencode-fast", "opencode-fast-fallback", "station"],
         },
         "defaultClass": "standard",
         "totalWriteJobsPerRepo": 4,
@@ -346,6 +379,24 @@ def _migrate(stored: dict) -> dict:
         # relative order actually flipped, not an insertion.
         workers = stored.setdefault("workers", {})
         workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
+    if have < 10:
+        # Additive, unlike v6-v9: a verified-working fallback is inserted
+        # right after its primary tier in each class, nothing reordered or
+        # removed, so this can patch a user's custom list the same way v4/v5
+        # did rather than replacing it outright.
+        workers = stored.setdefault("workers", {})
+        routing = workers.setdefault("classRouting", {})
+        desired = DEFAULTS["workers"]["classRouting"]
+        fallback_of = {"opencode-main": "opencode-main-fallback",
+                       "opencode-smart": "opencode-smart-fallback",
+                       "opencode-fast": "opencode-fast-fallback"}
+        for task_class, defaults in desired.items():
+            current = routing.get(task_class)
+            if current is None:
+                continue  # deep merge will supply the new default
+            for primary, fallback in fallback_of.items():
+                if primary in current and fallback not in current:
+                    current.insert(current.index(primary) + 1, fallback)
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]
     bak = CONFIG_PATH.with_suffix(f".v{have}."
                                   f"{time.strftime('%Y%m%d-%H%M%S')}.json")
