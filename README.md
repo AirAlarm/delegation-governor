@@ -53,10 +53,12 @@ Two facts shaped the design, both verified live:
 
 ## Requirements
 
-Windows, git, Python 3.11+ (via `uv`), Claude Desktop/Code, and the official
-Codex Claude plugin (`codex@openai-codex`) with Codex authenticated.
-cc-delegate, LM Studio, Oracle, and OpenRouter are optional lanes. Missing pieces
-are marked unavailable rather than silently replaced with a different transport.
+The Claude Code plugin works on macOS, Linux, and Windows with git, `uv`, and
+Python 3.11+. The managed `dg install` flow and optional proxy require Windows.
+The official Codex Claude plugin (`codex@openai-codex`) must be authenticated to
+use the Codex lane. cc-delegate, LM Studio, Oracle, and OpenRouter are optional
+lanes; missing pieces are marked unavailable rather than silently replaced with
+a different transport.
 
 ## Install
 
@@ -76,6 +78,25 @@ uninstall.
 
 It also re-applies the **cc-delegate station patch**, which the Governor owns
 (see below). Your cc-delegate profiles and credentials are never touched.
+
+### Install as a Claude Code plugin
+
+For the cross-platform, worker-delegation-only plugin path, clone the repository
+and point Claude Code at its root:
+
+```bash
+git clone <this repo>
+claude --plugin-dir /absolute/path/to/delegation-governor
+```
+
+The plugin uses `uv` to run its prompt and hard-routing hooks directly from the
+checkout. On the first session start it also installs the editable `dg` tool so
+commands such as `dg status`, `dg quickread`, and `dg safewrite` are available
+from a shell (provided the uv tool bin directory is on `PATH`).
+
+This plugin path intentionally excludes the proxy and supervisor-fallback
+subsystem. That remains a separate, Windows-only manual setup using
+`dg install --proxy`; it is neither started nor configured by the plugin.
 
 ### The cc-delegate station patch
 

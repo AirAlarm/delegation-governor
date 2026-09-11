@@ -32,7 +32,10 @@ BACKUPS = CLAUDE_DIR / "backups"
 SKILL_DST = CLAUDE_DIR / "skills" / "delegation-governor"
 # Shipped inside the package so it is found identically from a source checkout
 # and from an installed tool (`uv tool install`), whose wheel has no repo tree.
-SKILL_SRC = Path(__file__).resolve().parent / "skill"
+SKILL_SRC = Path(__file__).resolve().parent / "skills" / "delegation-governor"
+# The plugin's root hooks.json also installs the editable `dg` tool at
+# SessionStart. That lifecycle behavior cannot be verified here without loading
+# the installed plugin in a real Claude Code session, so it needs a smoke test.
 # Versioned runtimes allow release N to install N+1 on Windows, where a
 # running python.exe cannot safely be replaced in place.
 RUNTIME = config.HOME / "runtimes" / VERSION

@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "tool",
+              "install",
+              "--editable",
+              "${CLAUDE_PLUGIN_ROOT}",
+              "--quiet"
+            ],
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "run",
+              "--project",
+              "${CLAUDE_PLUGIN_ROOT}",
+              "dg",
+              "hook",
+              "prompt"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": [
+              "run",
+              "--project",
+              "${CLAUDE_PLUGIN_ROOT}",
+              "dg",
+              "hook",
+              "prompt"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
