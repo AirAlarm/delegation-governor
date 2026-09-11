@@ -10,9 +10,14 @@ delegation would leave two models resident and thrash.
 
   1. no-ops unless `api_base` is a local LM Studio endpoint (so non-local
      profiles - minimax, deepseek, ... - are untouched);
-  2. refuses to start if another cc-delegate job is still `running` against a
-     different model (serialises local worker tasks - the user's rule is
-     "no parallel local-model jobs for now");
+  2. refuses to start if another *local* cc-delegate job is still `running`
+     against a different model (serialises local worker tasks - the user's
+     rule is "no parallel local-model jobs for now"). A remote job (oracle,
+     opencode-go, openrouter) never contends for this GPU and must not be
+     treated as a clash -- verified live 2026-09-11: a station-main launch
+     was refused over an *oracle-coder* job that was actually running fine
+     on a completely different, remote box, because the clash check scanned
+     every running job file regardless of whether it was local at all;
   3. unloads every other resident LLM via the `lms` CLI (targeted by exact id,
      never `lms unload --all`);
   4. loads the target model if it is not already resident;
@@ -104,6 +109,22 @@ def lmstudio_model_id(model_str: str) -> str:
     return bare
 
 
+def _looks_local(model_str: str) -> bool:
+    """Best-effort: was this OTHER running job also a local LM Studio one?
+
+    Job files record only `model`, not `api_base`, so this can't check the
+    other job's real endpoint the way `is_local_lmstudio` checks the
+    *target*'s. Every local profile (station-fast/main/smart) uses litellm's
+    "openai/" custom-provider prefix, because that's how LM Studio's
+    OpenAI-compatible API is reached; every remote one (oracle-*, opencode-go,
+    openrouter-coder) uses a different provider prefix. Good enough to stop a
+    remote job from blocking a local one; revisit if a future local profile
+    ever needs a different litellm provider prefix.
+    """
+    bare = model_str.split(":", 1)[-1] if ":" in model_str else model_str
+    return bare.startswith("openai/")
+
+
 def _find_lms() -> str:
     for cand in (
         shutil.which("lms"),
@@ -166,7 +187,12 @@ def _lms(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
 
 
 def _running_jobs_other_model(jobs_dir: str | None, target_id: str) -> list[str]:
-    """task ids of still-running cc-delegate jobs bound to a different model."""
+    """task ids of still-running *local* cc-delegate jobs bound to a different model.
+
+    A running remote job (oracle, opencode-go, openrouter) is never a clash --
+    it isn't touching this GPU at all -- so it's filtered out via
+    `_looks_local` before comparing model ids.
+    """
     if not jobs_dir or not os.path.isdir(jobs_dir):
         return []
     clash = []
@@ -177,7 +203,10 @@ def _running_jobs_other_model(jobs_dir: str | None, target_id: str) -> list[str]
             continue
         if j.get("status") != "running":
             continue
-        other = lmstudio_model_id(j.get("model") or "")
+        raw_model = j.get("model") or ""
+        if not _looks_local(raw_model):
+            continue
+        other = lmstudio_model_id(raw_model)
         if other and other != target_id:
             clash.append(f"{j.get('taskId', jf.stem)} ({other})")
     return clash
