@@ -9,6 +9,8 @@ broken statusline must not blank the status bar.
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -96,6 +98,134 @@ def statusline() -> int:
 
 # ---------------------------------------------------------------- prompt
 
+_DELEGATE_MIN_LINES = 350
+_DELEGATE_MIN_BYTES = 100_000
+_DELEGATE_MIN_TOKENS = 25_000
+_BASH_READERS = {"cat", "head", "tail", "less", "more"}
+
+
+def _permission(decision: str, reason: str) -> int:
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+        "permissionDecisionReason": reason,
+    }}))
+    return 0
+
+
+def _threshold(name: str, default: int) -> int:
+    value = int(os.environ.get(name, default))
+    if value < 1:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _large_file_reason(path: Path) -> str | None:
+    min_lines = _threshold("DG_DELEGATE_MIN_LINES", _DELEGATE_MIN_LINES)
+    min_bytes = _threshold("DG_DELEGATE_MIN_BYTES", _DELEGATE_MIN_BYTES)
+    min_tokens = _threshold("DG_DELEGATE_MIN_TOKENS", _DELEGATE_MIN_TOKENS)
+
+    # Opening before deciding is important: a file that exists but cannot be
+    # read must pass through so the real tool can report its own error.
+    with path.open("rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        tokens = (size + 3) // 4
+        exceeded = []
+        if size > min_bytes:
+            exceeded.append(f"{size} bytes > {min_bytes}")
+        if tokens > min_tokens:
+            exceeded.append(f"~{tokens} tokens > {min_tokens}")
+        if exceeded:
+            return ", ".join(exceeded)
+
+        newlines = 0
+        has_data = False
+        last = b""
+        while chunk := stream.read(64 * 1024):
+            has_data = True
+            last = chunk[-1:]
+            newlines += chunk.count(b"\n")
+            if newlines > min_lines:
+                return f"more than {min_lines} lines"
+        lines = newlines + int(has_data and last != b"\n")
+        if lines > min_lines:
+            return f"{lines} lines > {min_lines}"
+    return None
+
+
+def _resolve_file(value: Any, cwd: Any) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        base = Path(cwd) if isinstance(cwd, str) and cwd else Path.cwd()
+        path = base / path
+    path = path.resolve()
+    return path if path.is_file() else None
+
+
+def _bash_files(command: Any, cwd: Any) -> list[Path]:
+    """Return confidently parsed operands of one plain file-reader command.
+
+    This intentionally is not a shell parser. Anything with shell control
+    syntax or options is left alone rather than risking a false denial.
+    """
+    if not isinstance(command, str) or not command or "\n" in command or "`" in command:
+        return []
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|&;<>()")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    tokens = list(lexer)
+    if not tokens or any(any(mark in token for mark in "|&;<>()") for token in tokens):
+        return []
+    if tokens[0] not in _BASH_READERS or len(tokens) < 2:
+        return []
+    if any(token.startswith("-") for token in tokens[1:]):
+        return []
+
+    paths = [_resolve_file(token, cwd) for token in tokens[1:]]
+    # Missing files, globs, and non-file operands are intentionally ambiguous.
+    return [path for path in paths if path is not None] if all(paths) else []
+
+
+def _pretooluse_decision(payload: dict) -> tuple[str, str]:
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return "allow", "Delegation gate does not apply."
+
+    tool = payload.get("tool_name")
+    if tool == "Read":
+        if (tool_input.get("offset") is not None
+                or tool_input.get("limit") is not None):
+            return "allow", "Targeted Read calls stay with the current worker."
+        path = _resolve_file(tool_input.get("file_path"), payload.get("cwd"))
+        paths = [path] if path is not None else []
+    elif tool == "Bash":
+        paths = _bash_files(tool_input.get("command"), payload.get("cwd"))
+    else:
+        paths = []
+
+    for path in paths:
+        exceeded = _large_file_reason(path)
+        if exceeded:
+            return ("deny", f"{path} exceeds the delegation threshold ({exceeded}). "
+                    "Use the bulk-read alternative to delegate the full read; use "
+                    "offset/limit when exact content from one section is needed.")
+    return "allow", "File read is below the delegation thresholds or is not a full read."
+
+
+def pretooluse(payload: dict | None = None) -> int:
+    """PreToolUse(Read|Bash): hard-route confident full reads of large files."""
+    _safe_stdout()
+    try:
+        decision, reason = _pretooluse_decision(payload if payload is not None else _stdin_json())
+    except Exception:
+        decision, reason = "allow", "Delegation gate failed open."
+    try:
+        return _permission(decision, reason)
+    except Exception:
+        return 0
+
 def prompt() -> int:
     """UserPromptSubmit: one compact line of Governor STATE.
 
@@ -104,7 +234,11 @@ def prompt() -> int:
     nothing worth saying.
     """
     _safe_stdout()
-    _stdin_json()
+    payload = _stdin_json()
+    # The installed command is shared; the event name keeps the two paths
+    # separate before UserPromptSubmit does any state work.
+    if isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse":
+        return pretooluse(payload)
     try:
         con, cfg = _load()
         sync.reconcile(con, cfg)
@@ -246,8 +380,8 @@ def _spawn_proxy(port: int) -> None:
                      env=env, **kw)
 
 
-HOOKS = {"statusline": statusline, "prompt": prompt, "stopfailure": stopfailure,
-         "session": session}
+HOOKS = {"statusline": statusline, "prompt": prompt, "pretooluse": pretooluse,
+         "stopfailure": stopfailure, "session": session}
 
 
 def run(name: str) -> int:
