@@ -10,7 +10,8 @@ them can run at the same time:
 | `oracle` | a separate CPU VM, slow | `tiny`, `simple` |
 | `openrouter` | metered cloud API | `standard`, `hard`, overflow |
 
-`station`, `oracle`, and `openrouter` are reached through cc-delegate but have
+`station`, `oracle`, and `openrouter` are reached through dg-worker
+(delegation-governor's fork of cc-delegate) but have
 separate capacity, so they never contend with each other or Codex.
 
 ## Classify every task
@@ -32,7 +33,7 @@ dg lanes             # who is busy, who is down, which classes go where
 ```
 
 `dg fill` starts Codex work through the official Codex Claude plugin and hands back a work order for each
-cc-delegate lane, with the profile to use and the `dg attach ... --lane` to run
+dg-worker lane, with the profile to use and the `dg attach ... --lane` to run
 afterwards. Submit those with `run_dev_task`, then attach.
 
 `dg dispatch <id>` still does one task, choosing its lane the same way.
@@ -51,23 +52,23 @@ missing, disabled, incompatible, or unauthenticated, the Codex lane is down.
 WRITE tasks get a git worktree outside your repo, branched from the current
 commit. Your working tree is never touched.
 
-## cc-delegate
+## dg-worker
 
-cc-delegate is an MCP server, so **you** start it, not `dg`:
+dg-worker is an MCP server, so **you** start it, not `dg`:
 
 ```bash
-dg dispatch DG-4              # prints the work order when cc-delegate is chosen
+dg dispatch DG-4              # prints the work order when dg-worker is chosen
 ```
 then call the MCP tool `run_dev_task` with that work order as `spec`, and:
 ```bash
 dg attach DG-4 <task-id-returned-by-run_dev_task> --attempt <attempt-id>
 ```
 
-After that the Governor tracks it by reading cc-delegate's own job file - no
+After that the Governor tracks it by reading dg-worker's own job file - no
 MCP calls, no polling, no tokens. Do not call `get_task_status` in a loop.
 
 Its profiles (`station-main`, `oracle-coder`, `openrouter-coder`, and friends)
-are still yours to choose; the Governor never edits cc-delegate configuration.
+are still yours to choose; the Governor never edits dg-worker configuration.
 OpenRouter is down until `openrouter-coder` exists and its
 `OPENROUTER_API_KEY` is available. That lane uses one metered slot and is never
 selected as the Claude supervisor.
@@ -75,7 +76,7 @@ selected as the Claude supervisor.
 ## Fallback
 
 If Codex is already known exhausted, `dg dispatch` goes straight to
-cc-delegate - **no Codex request is spent rediscovering it**. That is the
+dg-worker - **no Codex request is spent rediscovering it**. That is the
 entire point of the quota cache.
 
 If Codex dies of quota mid-task:
@@ -103,5 +104,5 @@ dg clear-override
 Forced mode is visible in `dg status` and the statusline.
 
 Codex, Station, Oracle, and OpenRouter reservations are independent. Submit all
-three cc-delegate handoffs immediately after `dg fill`; none waits for Codex or
+three dg-worker handoffs immediately after `dg fill`; none waits for Codex or
 another profile.
