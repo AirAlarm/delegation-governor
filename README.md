@@ -95,18 +95,32 @@ It also re-applies the **cc-delegate station patch**, which the Governor owns
 
 ### Install as a Claude Code plugin
 
-For the cross-platform, worker-delegation-only plugin path, clone the repository
-and point Claude Code at its root:
+For the cross-platform, worker-delegation-only plugin path, clone the
+repository and register it as a local marketplace, then install from it:
 
 ```bash
-git clone <this repo>
-claude --plugin-dir /absolute/path/to/delegation-governor
+git clone https://github.com/AirAlarm/delegation-governor.git
+claude plugin marketplace add /absolute/path/to/delegation-governor
+claude plugin install delegation-governor@delegation-governor-marketplace
 ```
 
-The plugin uses `uv` to run its prompt and hard-routing hooks directly from the
-checkout. On the first session start it also installs the editable `dg` tool so
-commands such as `dg status`, `dg quickread`, and `dg safewrite` are available
-from a shell (provided the uv tool bin directory is on `PATH`).
+(`claude --plugin-dir /path` also works for a one-off session, but doesn't
+persist across restarts the way an actual install does -- the marketplace
+route is the one that's been verified end-to-end, including a clean swap
+away from a separately-installed `cc-delegate`.)
+
+The plugin uses `uv` to run its prompt and hard-routing hooks, and the
+bundled `dg-worker` MCP server (delegation-governor's own fork of
+[cc-delegate](https://github.com/EtienneLescot/cc-delegate), see `worker/`),
+directly from the checkout. On the first session start it also installs the
+editable `dg` tool so commands such as `dg status`, `dg quickread`, and
+`dg safewrite` are available from a shell (provided the uv tool bin directory
+is on `PATH`).
+
+**If you edit the plugin locally** (developing against your own checkout),
+`claude plugin update` only refreshes the installed copy when it detects a
+version bump in `plugin.json` -- a file move/edit without one silently keeps
+serving the stale cached copy. Uninstall and reinstall to force a fresh copy.
 
 This plugin path intentionally excludes the proxy and supervisor-fallback
 subsystem. That remains a separate, Windows-only manual setup using

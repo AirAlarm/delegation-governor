@@ -1,7 +1,7 @@
 [project]
 name = "delegation-governor"
 version = "0.3.0"
-description = "Multi-endpoint task orchestration for Claude Desktop: Codex, local, Oracle, and OpenRouter workers."
+description = "Multi-endpoint task orchestration for Claude Code: Codex, local Station, and OpenCode Go workers."
 requires-python = ">=3.11"
 dependencies = []
 

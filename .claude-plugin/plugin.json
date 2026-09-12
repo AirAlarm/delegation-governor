@@ -4,6 +4,7 @@
   "version": "0.3.0",
   "description": "Route implementation work to independent worker lanes with a dependency-aware task ledger.",
   "author": { "name": "AirAlarm" },
+  "license": "MIT",
   "keywords": ["delegation", "workers", "task-ledger", "routing"],
   "skills": "./src/dg/skills",
   "hooks": "./hooks.json",
