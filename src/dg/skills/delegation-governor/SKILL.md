@@ -25,7 +25,13 @@ PLAN -> LEDGER -> DISPATCH -> DON'T WAIT -> OTHER READY WORK
 3. **A slow worker is not a failed worker.** A cold local model can take
    minutes. Never duplicate a task because it is slow.
 4. **Keep the judgement, delegate the typing.** Architecture, trade-offs,
-   ambiguity, dangerous changes, final review: yours. See `references/rubric.md`.
+   ambiguity, dangerous changes, final review: yours. Before writing or
+   editing a third file in one task, or any rename/move touching 2+ files,
+   stop and name a specific `Keep` reason (see `references/rubric.md`) or
+   delegate it. "It needs precision," "it's high-stakes," and "it's faster
+   if I just do it" are not valid reasons -- they're the exact excuses a past
+   session used to hand-write a multi-file fork job that should have been a
+   work order. High-stakes means fence the work order tighter, not skip it.
 5. **Bounded work orders only.** Never paste conversation history to a worker.
    `dg workorder <id>` renders the contract; the worker reads the repo itself.
 6. **Classify tasks and fill every lane.** Codex, the GPU box, the VM,
