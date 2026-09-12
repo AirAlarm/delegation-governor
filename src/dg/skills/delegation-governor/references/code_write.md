@@ -22,6 +22,6 @@ If the response is wrapped in one outer triple-backtick code fence, safewrite
 removes that pair. Triple-backtick lines inside the generated file are kept.
 Unfenced content, including its byte content and newline style, is unchanged.
 
-Call cc-delegate's MCP `run_dev_task` yourself when it supplies the content.
+Call dg-worker's MCP `run_dev_task` yourself when it supplies the content.
 `dg safewrite` never invokes a worker or records a ledger task; it is only the
 disk-write safety layer after generation.

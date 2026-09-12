@@ -19,7 +19,7 @@ never leaves a plausible-looking partial corpus.
 
 ## Delegate it
 
-Call cc-delegate's MCP `run_dev_task` yourself. Put the read-only question and
+Call dg-worker's MCP `run_dev_task` yourself. Put the read-only question and
 the corpus in `spec`, select the appropriate profile, and ask for analysis only.
 `dg quickread` prepares input; it never calls the MCP tool.
 

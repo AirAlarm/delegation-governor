@@ -2,7 +2,7 @@
 
 ## Codex out of quota
 
-Automatic. Routing goes to cc-delegate; the reset time shows in `dg status`
+Automatic. Routing goes to dg-worker; the reset time shows in `dg status`
 and the statusline. Once it passes, the next decision probes the account at
 zero inference cost and returns to Codex only on confirmation.
 
@@ -12,7 +12,7 @@ zero inference cost and returns to Codex only on confirmation.
 ## Codex auth or network failure
 
 These are not quota. `dg status` names which one. Both fall back to
-cc-delegate and set a cooldown so the failure is not rediscovered before
+dg-worker and set a cooldown so the failure is not rediscovered before
 every task. Auth needs you: tell the user to run `codex login`.
 
 ## Anthropic approaching its limit
@@ -30,7 +30,7 @@ performed between requests:
 3. the next request tries local Qwen, then Oracle if Qwen is unavailable or
    returns a retryable/malformed-tool-call failure.
 
-The task ledger, running Codex jobs and running cc-delegate jobs all survive:
+The task ledger, running Codex jobs and running dg-worker jobs all survive:
 they live in the Governor's database and in the workers' own processes, not in
 the session.
 

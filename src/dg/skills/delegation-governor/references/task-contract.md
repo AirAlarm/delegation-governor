@@ -41,7 +41,7 @@ know. Two or three sentences.
 - Acceptance criteria must be checkable by the worker without asking you.
 - Name the paths. Path ownership is what lets two write jobs run at once.
 - Write it so a *different* worker could pick it up unchanged - a Codex task
-  may be re-run on cc-delegate after a quota failure, with no edits.
+  may be re-run on dg-worker after a quota failure, with no edits.
 - No secrets, no tokens, no absolute paths outside the repo.
 
 ## Read-only orders

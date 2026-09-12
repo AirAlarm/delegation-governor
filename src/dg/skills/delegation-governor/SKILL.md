@@ -1,6 +1,6 @@
 ---
 name: delegation-governor
-description: Route implementation work to Codex or cc-delegate instead of doing it yourself, and keep working while they run. Use when a task involves multi-file implementation, mechanical edits, migrations, codemods, test writing, broad repo search, or bounded diagnosis - and whenever a delegated job is already running and you are about to wait for it. Also use when the user mentions dg, the Governor, the task ledger, delegation, or asks why work is BLOCKED or which worker is active.
+description: Route implementation work to Codex or dg-worker instead of doing it yourself, and keep working while they run. Use when a task involves multi-file implementation, mechanical edits, migrations, codemods, test writing, broad repo search, or bounded diagnosis - and whenever a delegated job is already running and you are about to wait for it. Also use when the user mentions dg, the Governor, the task ledger, delegation, or asks why work is BLOCKED or which worker is active.
 ---
 
 # Delegation Governor
@@ -83,7 +83,7 @@ Keep decisions and review; hand over all the typing.
 | `references/rubric.md` | deciding whether to delegate at all |
 | `references/task-contract.md` | writing a work order |
 | `references/scheduler.md` | tasks, dependencies, path ownership, priority |
-| `references/workers.md` | Codex vs cc-delegate, fallback, recovery |
+| `references/workers.md` | Codex vs dg-worker, fallback, recovery |
 | `references/review.md` | collecting, reviewing and integrating results |
 | `references/recovery.md` | quota exhaustion, LOCAL supervisor, failures |
 | `references/bulk_read.md` | delegating a multi-file read/question, no ledger task |
