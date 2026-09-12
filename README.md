@@ -56,9 +56,23 @@ Two facts shaped the design, both verified live:
 The Claude Code plugin works on macOS, Linux, and Windows with git, `uv`, and
 Python 3.11+. The managed `dg install` flow and optional proxy require Windows.
 The official Codex Claude plugin (`codex@openai-codex`) must be authenticated to
-use the Codex lane. cc-delegate, LM Studio, Oracle, and OpenRouter are optional
-lanes; missing pieces are marked unavailable rather than silently replaced with
-a different transport.
+use the Codex lane. `dg-worker` (bundled, see below), LM Studio, and OpenCode Go
+are optional lanes; missing pieces are marked unavailable rather than silently
+replaced with a different transport.
+
+### dg-worker
+
+`worker/` is delegation-governor's own fork of [cc-delegate](https://github.com/EtienneLescot/cc-delegate)
+by Etienne Lescot (MIT-licensed; see `worker/LICENSE` and `worker/NOTICE`),
+bundled directly into this plugin so the delegation UI doesn't show up as a
+separate, third-party-branded plugin in Claude Code's plugin list. It's a
+rebrand of the identity layer only (server name, git author on salvaged
+commits) -- the `~/.cc-delegate/` config/credentials path and per-repo working
+directory are deliberately left unchanged, so any profiles and API keys
+already set up for the original cc-delegate keep working with zero migration.
+If the standalone `cc-delegate` plugin is also installed, `dg-worker` and it
+are independent -- each reads/writes the same `~/.cc-delegate/` state, so
+running both is redundant but not conflicting.
 
 ## Install
 

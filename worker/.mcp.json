@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "dg-worker": {
+      "command": "uv",
+      "args": ["run", "${CLAUDE_PLUGIN_ROOT}/worker/server/main.py"],
+      "env": {
+        "DELEGATE_API_KEY": "${DELEGATE_API_KEY}",
+        "DELEGATE_MODEL": "litellm:minimax/MiniMax-M3",
+        "DELEGATE_API_KEY_ENV_VAR": "MINIMAX_API_KEY"
+      }
+    }
+  }
+}

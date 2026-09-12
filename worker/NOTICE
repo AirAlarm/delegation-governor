@@ -1,0 +1,5 @@
+This project's worker depends on deepagents (MIT-licensed, https://github.com/langchain-ai/deepagents)
+and litellm's provider routing to reach third-party model endpoints (MiniMax by default). This
+repository's own source code is MIT-licensed. As a Claude Code plugin, it also runs inside
+Anthropic's Claude Code engine on the supervisor side, governed by Anthropic's Commercial Terms
+of Service. Review your chosen worker provider's terms before production use.

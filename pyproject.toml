@@ -12,5 +12,11 @@ dg = "dg.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pytest.ini_options]
+# worker/ vendors dg-worker's own source (a fork of cc-delegate) with its own
+# separate test suite and dependency set (litellm, deepagents, ...) that this
+# project's own env doesn't install -- run it from worker/ directly instead.
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/dg"]
