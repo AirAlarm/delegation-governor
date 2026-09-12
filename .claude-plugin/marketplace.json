@@ -1,0 +1,10 @@
+{
+  "name": "delegation-governor-marketplace",
+  "owner": { "name": "AirAlarm" },
+  "version": "0.3.0",
+  "description": "Marketplace hosting the Delegation Governor plugin.",
+  "plugins": [
+    { "name": "delegation-governor", "source": "./", "version": "0.3.0",
+      "keywords": ["delegation", "workers", "task-ledger", "routing"] }
+  ]
+}
