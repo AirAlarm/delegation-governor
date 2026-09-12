@@ -12,8 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import config, gitutil, quota_codex, routing, scheduler, store, supervisor, sync, workorder
-from . import quickread, safewrite
+from . import config, decisions, gitutil, quota_codex, routing, scheduler, store, supervisor, sync
+from . import quickread, safewrite, workorder
 from .workers import cc_delegate
 from .workers import codex_plugin
 
@@ -693,6 +693,33 @@ def cmd_logs(args) -> int:
         f"{_ago(f.stat().st_mtime):>6} ago  {f.stat().st_size:>8}  {f.name}" for f in files[:40]))
 
 
+def cmd_decision(args) -> int:
+    record = decisions.append_decision(args.type, args.task, args.reason, args.task_id)
+    return _emit(record, True)
+
+
+def cmd_decisions(args) -> int:
+    records = decisions.read_decisions()
+    if args.json:
+        return _emit(records, True)
+    counts = {decision: 0 for decision in decisions.DECISION_TYPES}
+    for record in records:
+        counts[record["decision"]] += 1
+    lines = [
+        f"Total: {len(records)}",
+        "  " + "  ".join(f"{decision}: {counts[decision]}"
+                          for decision in decisions.DECISION_TYPES),
+    ]
+    if records:
+        lines.extend(["", f"{'TIME':<19} {'TYPE':<8} {'TASK ID':<9} TASK / REASON"])
+        for record in records[-10:]:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record["ts"]))
+            task_id = record["related_task_id"] or "-"
+            lines.append(f"{timestamp} {record['decision']:<8} {task_id:<9} "
+                         f"{record['task']} / {record['reason']}")
+    return _emit(None, False, "\n".join(lines))
+
+
 def cmd_launch(args) -> int:
     """Lifecycle-supervised Claude Code. Stock `claude` is never shadowed."""
     from . import launcher
@@ -989,6 +1016,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = add("doctor", cmd_doctor, help="environment health")
     s.add_argument("--json", action="store_true")
     s.add_argument("--force", action="store_true")
+
+    s = add("decision", cmd_decision, help="record a supervisor delegation decision")
+    s.add_argument("--type", required=True, choices=decisions.DECISION_TYPES)
+    s.add_argument("--task", required=True)
+    s.add_argument("--reason", required=True)
+    s.add_argument("--task-id")
+
+    s = add("decisions", cmd_decisions, help="supervisor delegation decision log")
+    s.add_argument("--json", action="store_true")
 
     s = add("logs", cmd_logs, help="worker logs")
     s.add_argument("id", nargs="?")
