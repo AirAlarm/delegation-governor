@@ -21,7 +21,12 @@ PLAN -> LEDGER -> DISPATCH -> DON'T WAIT -> OTHER READY WORK
 1. **Never idle.** After dispatching, run `dg tasks ready` and start the top
    item. Only wait when READY is genuinely empty and everything else is BLOCKED.
 2. **Never busy-poll.** Do not re-check a worker to see if it finished. Worker
-   state updates itself; `dg collect <id>` at a natural stopping point.
+   state updates itself; `dg collect <id>` at a natural stopping point. If you
+   tell the user "I'll check back once it's done," that sentence is only true
+   if you actually start a background watcher (a `run_in_background` Bash
+   loop polling `dg tasks running --json`) in the same turn -- saying it
+   without doing it is a promise you can't keep, confirmed live when it
+   didn't happen and the user had to prompt instead.
 3. **A slow worker is not a failed worker.** A cold local model can take
    minutes. Never duplicate a task because it is slow.
 4. **Keep the judgement, delegate the typing.** Architecture, trade-offs,
@@ -43,6 +48,13 @@ PLAN -> LEDGER -> DISPATCH -> DON'T WAIT -> OTHER READY WORK
    skip the ledger entirely -- cheaper than a full WRITE task for something
    that doesn't need review or integration. See `references/bulk_read.md` and
    `references/code_write.md`.
+8. **Log every delegate/keep/takeover decision.** `dg decision --type
+   {delegate,keep,takeover} --task "..." --reason "..."` (add `--task-id DG-N`
+   when one exists). Most of a session's real work never becomes a ledger
+   task at all -- this is the only record that can later answer whether the
+   Governor actually saves supervisor tokens or just spends them on
+   dispatch/diagnosis/redo overhead. Log the fork in the road, not every
+   routine review-and-integrate afterward.
 
 ## Minimum commands
 
