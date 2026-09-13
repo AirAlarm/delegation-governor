@@ -46,7 +46,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-LOCK_PATH = Path(os.path.expanduser("~")) / ".cc-delegate" / "lmstudio_gate.lock"
+LOCK_PATH = Path(os.path.expanduser("~")) / ".delegation-governor" / "lmstudio_gate.lock"
 
 # generous: a 22 GB partial-offload model cold-loads in ~60-90 s here
 LOAD_TIMEOUT_S = 600

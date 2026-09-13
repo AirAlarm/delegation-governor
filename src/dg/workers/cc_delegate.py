@@ -21,7 +21,7 @@ WORK_DIR = ".cc-delegate"
 
 
 def _config_path() -> Path:
-    return Path.home() / ".cc-delegate" / "config.json"
+    return Path.home() / ".delegation-governor" / "config.json"
 
 
 def profile(endpoint_name: str, profile_name: str | None) -> dict:

@@ -170,7 +170,7 @@ DEFAULTS: dict[str, Any] = {
                 "kind": "openrouter",
                 "baseUrl": "https://openrouter.ai/api",
                 "tokenEnvVar": "OPENROUTER_API_KEY",
-                "tokenFile": "~/.cc-delegate/credentials.json",
+                "tokenFile": "~/.delegation-governor/credentials.json",
                 "tokenFileKey": "OPENROUTER_API_KEY",
                 "probeTimeoutSeconds": 10,
             },
@@ -196,7 +196,7 @@ DEFAULTS: dict[str, Any] = {
                 # since the probe and every profile need /v1/messages.
                 "model": "minimax-m3",
                 "tokenEnvVar": "OPENCODE_GO_API_KEY",
-                "tokenFile": "~/.cc-delegate/credentials.json",
+                "tokenFile": "~/.delegation-governor/credentials.json",
                 "tokenFileKey": "OPENCODE_GO_API_KEY",
                 "probeTimeoutSeconds": 10,
             },
@@ -240,9 +240,10 @@ DEFAULTS: dict[str, Any] = {
             "model": "oracle-smart · gemma-4 26b",
             "smallModel": "oracle-fast · gemma-4 e2b",
             "tokenEnvVar": "ORACLE_LLM_API_KEY",
-            # Fall back to the key cc-delegate already stores for this gateway
-            # rather than asking for a second copy. Read on use, never cached.
-            "tokenFile": "~/.cc-delegate/credentials.json",
+            # Fall back to the key the worker store already holds for this
+            # gateway rather than asking for a second copy. Read on use, never
+            # cached.
+            "tokenFile": "~/.delegation-governor/credentials.json",
             "tokenFileKey": "ORACLE_LLM_API_KEY",
             # A CPU-only ARM box: minutes per turn is normal, not a failure.
             "probeTimeoutSeconds": 20,

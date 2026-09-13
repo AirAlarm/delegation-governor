@@ -396,7 +396,7 @@ def local_contention(cfg: dict) -> str:
     if not lm:
         return ""
     try:
-        cc = json.loads((Path.home() / ".cc-delegate" / "config.json").read_text("utf-8"))
+        cc = json.loads((Path.home() / ".delegation-governor" / "config.json").read_text("utf-8"))
     except (OSError, ValueError):
         return ""
     host = lm["baseUrl"].rstrip("/")

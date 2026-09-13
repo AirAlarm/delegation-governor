@@ -485,8 +485,8 @@ class TestSharedModelSlot(LauncherTest):
 
     def _cc_config(self, profiles):
         d = self.home / "cc"
-        (d / ".cc-delegate").mkdir(parents=True, exist_ok=True)
-        (d / ".cc-delegate" / "config.json").write_text(
+        (d / ".delegation-governor").mkdir(parents=True, exist_ok=True)
+        (d / ".delegation-governor" / "config.json").write_text(
             json.dumps({"profiles": profiles}), encoding="utf-8")
         launcher.Path = type("P", (), {"home": staticmethod(lambda: d)})()
 

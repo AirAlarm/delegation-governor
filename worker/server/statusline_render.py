@@ -1,7 +1,7 @@
 """Renders the active delegation into a pre-baked status-line file.
 
 Design: the MCP server (already resident) does the rendering in Python and
-writes a ready-to-print file at ``~/.cc-delegate/statusline``. The status-line
+writes a ready-to-print file at ``~/.delegation-governor/statusline``. The status-line
 script Claude Code runs is then a trivial, dependency-free reader (no python,
 no jq, no JSON parsing on the shell side). Both ends are token-free — the
 harness runs the reader locally and the server was already running.
@@ -43,7 +43,7 @@ _STYLE: dict[str, tuple[str, str, int]] = {
 
 
 def global_path() -> Path:
-    return Path.home() / ".cc-delegate" / "statusline"
+    return Path.home() / ".delegation-governor" / "statusline"
 
 
 def short_id(task_id: str) -> str:

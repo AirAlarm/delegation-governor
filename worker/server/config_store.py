@@ -2,8 +2,8 @@
 
 Layout on disk (created on first write):
 
-    ~/.cc-delegate/config.json       # profiles + default_profile (no secrets)
-    ~/.cc-delegate/credentials.json  # env-var-name -> API key (facade-managed)
+    ~/.delegation-governor/config.json       # profiles + default_profile (no secrets)
+    ~/.delegation-governor/credentials.json  # env-var-name -> API key (facade-managed)
 
 The store is read PER TASK (at run_dev_task time), never cached at server
 launch — that is what makes configuration changes apply without restarting
@@ -11,11 +11,15 @@ Claude Code. Environment variables remain a fallback so a pre-facade,
 env-only setup keeps working unchanged.
 
 API-key resolution order for a profile's `api_key_env_var`:
-  1. ~/.cc-delegate/credentials.json entry (facade-managed, most intentional)
+  1. ~/.delegation-governor/credentials.json entry (facade-managed, most intentional)
   2. the OS environment variable itself
   3. legacy DELEGATE_API_KEY environment variable
 
-Override the store location with CC_DELEGATE_HOME (used by tests).
+Override the store location with DELEGATION_GOVERNOR_HOME (used by tests).
+CC_DELEGATE_HOME is still honored so an existing pre-rename override keeps
+working; this store was ~/.cc-delegate/ before the dg-worker fork claimed its
+own path. Distinct from ~/.claude/delegation-governor/, which is the dg CLI's
+own config (see src/dg/config.py) — this one is the worker's.
 """
 
 from __future__ import annotations
@@ -37,8 +41,8 @@ OAUTH_CACHE_DIRS: dict[str, str] = {
 
 
 def home_dir() -> Path:
-    override = os.environ.get("CC_DELEGATE_HOME")
-    return Path(override) if override else Path.home() / ".cc-delegate"
+    override = os.environ.get("DELEGATION_GOVERNOR_HOME") or os.environ.get("CC_DELEGATE_HOME")
+    return Path(override) if override else Path.home() / ".delegation-governor"
 
 
 def config_path() -> Path:

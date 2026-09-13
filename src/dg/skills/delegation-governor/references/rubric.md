@@ -28,7 +28,7 @@ delegate instead:
 - "It's high-stakes / could break something live" -- that is a reason to
   fence the work order tighter (name the exact files it may touch, name what
   it must never touch), not a reason to do it yourself. "Never touch
-  `~/.cc-delegate/`" is one sentence in a work order.
+  `~/.delegation-governor/`" is one sentence in a work order.
 - "It's faster if I just do it" -- almost always true in the moment, and
   exactly the shortcut that makes the Governor pointless. The cost that
   matters is supervisor tokens and context, not wall-clock time on this one

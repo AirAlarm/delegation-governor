@@ -66,13 +66,21 @@ replaced with a different transport.
 by Etienne Lescot (MIT-licensed; see `worker/LICENSE` and `worker/NOTICE`),
 bundled directly into this plugin so the delegation UI doesn't show up as a
 separate, third-party-branded plugin in Claude Code's plugin list. It's a
-rebrand of the identity layer only (server name, git author on salvaged
-commits) -- the `~/.cc-delegate/` config/credentials path and per-repo working
-directory are deliberately left unchanged, so any profiles and API keys
-already set up for the original cc-delegate keep working with zero migration.
-If the standalone `cc-delegate` plugin is also installed, `dg-worker` and it
-are independent -- each reads/writes the same `~/.cc-delegate/` state, so
-running both is redundant but not conflicting.
+rebrand of the identity layer (server name, git author on salvaged commits)
+plus its own home store: profiles, credentials, the statusline and the LM
+Studio lock live in `~/.delegation-governor/`, not the original's
+`~/.cc-delegate/`. Set `DELEGATION_GOVERNOR_HOME` to relocate it.
+
+The *per-repo* working directory is still `<repo>/.cc-delegate/` (worktrees,
+jobs, patches), deliberately unchanged -- it is already gitignored in existing
+checkouts and carries no secrets. Override it with `DELEGATE_WORK_DIR`.
+
+Migrating from the original cc-delegate: copy `~/.cc-delegate/config.json` and
+`credentials.json` to `~/.delegation-governor/` (nothing reads the old path
+any more). If the standalone `cc-delegate` plugin is also installed, the two
+are now fully independent and no longer share profiles, keys, or the LM Studio
+model-slot lock -- so running both against one LM Studio instance can evict
+each other's model.
 
 ## Install (Windows only)
 
@@ -287,7 +295,7 @@ dg integrate $A --cleanup
       "model": "oracle-smart · gemma-4 26b",
       "smallModel": "oracle-fast · gemma-4 e2b",
       "tokenEnvVar": "ORACLE_LLM_API_KEY",
-      "tokenFile": "~/.cc-delegate/credentials.json",
+      "tokenFile": "~/.delegation-governor/credentials.json",
       "tokenFileKey": "ORACLE_LLM_API_KEY",
       "probeTimeoutSeconds": 20 }
   ]

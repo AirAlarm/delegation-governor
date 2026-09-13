@@ -122,7 +122,7 @@ returns a verification URL and user code — relay both to the user verbatim, th
 ## Station routing (this machine — measured station-coder-sweep policy, 2026-09-07)
 
 This box routes `run_dev_task` to local LM Studio workers. Three profiles
-(`~/.cc-delegate/config.json`): **station-fast** (gemma-4-e4b),
+(`~/.delegation-governor/config.json`): **station-fast** (gemma-4-e4b),
 **station-main** (**qwen3.5-9b**, the default), **station-smart** (qwen3.6-35b-a3b).
 Gate loads at `--context-length 32768`.
 

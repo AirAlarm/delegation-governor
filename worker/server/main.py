@@ -5,11 +5,11 @@
 """dg-worker MCP server -- delegation-governor's own fork of cc-delegate
 (https://github.com/EtienneLescot/cc-delegate, MIT, see worker/LICENSE and
 worker/NOTICE) so the delegation UI no longer looks like a third party's
-plugin. Deliberately keeps the same ~/.cc-delegate/ home-directory config,
-credentials, and per-repo working-directory *default* as the original: real,
-already-configured profiles and API keys must keep working with zero
-migration. Only cosmetic identity (server name, git author on salvaged
-commits) is rebranded.
+plugin. The home-directory store (profiles, credentials, statusline, LM Studio
+lock) is dg-worker's own at ~/.delegation-governor/, not the original's
+~/.cc-delegate/; set DELEGATION_GOVERNOR_HOME to relocate it. The *per-repo*
+working directory default is still `.cc-delegate/`, deliberately unchanged so
+existing worktrees, jobs and patches stay where they are.
 
 Python edition (parallel implementation of src/mcp-server.ts — same four
 tools, same response shapes, same persisted-job format). Runs over stdio via
