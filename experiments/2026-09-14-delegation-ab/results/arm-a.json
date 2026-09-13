@@ -1,0 +1,48 @@
+{
+  "session_id": "9e854f96-130c-458c-986e-3fb50c5a045b",
+  "tokens": {
+    "input": 214,
+    "cache_write": 167299,
+    "cache_read": 13326012,
+    "output": 63705,
+    "processed": 13557230,
+    "generated": 231218,
+    "api_calls": 106
+  },
+  "wall_minutes": 21.9,
+  "tool_calls": {
+    "Bash": 81,
+    "Read": 48,
+    "mcp__plugin_delegation-governor_dg-worker__run_dev_task": 3,
+    "ToolSearch": 2,
+    "WebFetch": 2,
+    "Skill": 1
+  },
+  "start": "2026-09-13T20:46:34.334Z",
+  "end": "2026-09-13T21:08:26.207Z",
+  "claude_windows": {
+    "five_hour": {
+      "start": 8,
+      "end": 11,
+      "delta": 3,
+      "window_reset_during_arm": false
+    },
+    "seven_day": {
+      "start": 9,
+      "end": 10,
+      "delta": 1,
+      "window_reset_during_arm": false
+    },
+    "snapshots": 215,
+    "raw_first": {
+      "five_hour": {
+        "used_percentage": 8,
+        "resets_at": 1789347600
+      },
+      "seven_day": {
+        "used_percentage": 9,
+        "resets_at": 1789707600
+      }
+    }
+  }
+}

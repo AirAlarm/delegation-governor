@@ -1,0 +1,47 @@
+{
+  "session_id": "1c1134b1-34f9-4132-8355-f529bafecbff",
+  "tokens": {
+    "input": 234,
+    "cache_write": 145582,
+    "cache_read": 12400596,
+    "output": 71302,
+    "processed": 12617714,
+    "generated": 217118,
+    "api_calls": 117
+  },
+  "wall_minutes": 22.0,
+  "tool_calls": {
+    "Bash": 69,
+    "Read": 43,
+    "WebFetch": 2,
+    "ToolSearch": 1,
+    "Skill": 1
+  },
+  "start": "2026-09-13T20:22:35.763Z",
+  "end": "2026-09-13T20:44:36.433Z",
+  "claude_windows": {
+    "five_hour": {
+      "start": 3,
+      "end": 7.000000000000001,
+      "delta": 4.000000000000001,
+      "window_reset_during_arm": false
+    },
+    "seven_day": {
+      "start": 9,
+      "end": 9,
+      "delta": 0,
+      "window_reset_during_arm": false
+    },
+    "snapshots": 248,
+    "raw_first": {
+      "five_hour": {
+        "used_percentage": 3,
+        "resets_at": 1789347600
+      },
+      "seven_day": {
+        "used_percentage": 9,
+        "resets_at": 1789707600
+      }
+    }
+  }
+}
