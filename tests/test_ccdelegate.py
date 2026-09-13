@@ -6,6 +6,7 @@ tests pin the detection that makes that visible instead of mysterious.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 from unittest import mock
 
@@ -92,40 +93,58 @@ class TestDetection(DGTest):
 
 
 class TestStallTimeout(DGTest):
-    """DELEGATE_STALL_TIMEOUT_S: verified live 2026-09-11, cc-delegate's 300s
-    default kills genuinely-in-progress runs on Oracle's CPU-only inference,
-    well short of the real 30-minute run timeout."""
+    """DELEGATE_STALL_TIMEOUT_S: cc-delegate's 300s default kills genuinely
+    in-progress runs on a slow local model (a cold station load), well short of
+    the real 30-minute run timeout.
 
-    def _reg_result(self, stdout: str, returncode: int = 0):
-        return lambda args, **kw: type(
-            "R", (), {"returncode": returncode, "stdout": stdout, "stderr": ""})()
+    The value is read from the registry on Windows and from the environment
+    elsewhere; each branch is pinned explicitly so both run on any host."""
 
-    def test_unset_is_not_ok(self):
-        with mock.patch.object(ccdelegate.subprocess, "run", self._reg_result("", 1)):
-            value, ok = ccdelegate.stall_timeout_state()
-        self.assertIsNone(value)
-        self.assertFalse(ok)
+    def _registry(self, stdout: str, returncode: int = 0):
+        """Force the Windows branch and fake `reg query`'s output."""
+        result = type("R", (), {"returncode": returncode, "stdout": stdout, "stderr": ""})()
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(ccdelegate.os, "name", "nt"))
+        stack.enter_context(mock.patch.object(
+            ccdelegate.subprocess, "run", lambda args, **kw: result))
+        return stack
 
-    def test_below_recommended_is_not_ok(self):
-        with mock.patch.object(
-                ccdelegate.subprocess, "run",
-                self._reg_result("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    300")):
-            value, ok = ccdelegate.stall_timeout_state()
-        self.assertEqual(value, 300)
-        self.assertFalse(ok)
+    def _environ(self, raw: str | None):
+        """Force the POSIX branch with the variable set (or unset)."""
+        env = {} if raw is None else {ccdelegate.STALL_TIMEOUT_ENV: raw}
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(ccdelegate.os, "name", "posix"))
+        stack.enter_context(mock.patch.dict(ccdelegate.os.environ, env, clear=True))
+        return stack
 
-    def test_at_recommended_is_ok(self):
-        with mock.patch.object(
-                ccdelegate.subprocess, "run",
-                self._reg_result("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    900")):
-            value, ok = ccdelegate.stall_timeout_state()
-        self.assertEqual(value, 900)
-        self.assertTrue(ok)
+    def test_registry_unset_is_not_ok(self):
+        with self._registry("", 1):
+            self.assertEqual(ccdelegate.stall_timeout_state(), (None, False))
 
-    def test_malformed_value_is_treated_as_unset(self):
-        with mock.patch.object(
-                ccdelegate.subprocess, "run",
-                self._reg_result("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    not-a-number")):
-            value, ok = ccdelegate.stall_timeout_state()
-        self.assertIsNone(value)
-        self.assertFalse(ok)
+    def test_registry_below_recommended_is_not_ok(self):
+        with self._registry("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    300"):
+            self.assertEqual(ccdelegate.stall_timeout_state(), (300, False))
+
+    def test_registry_at_recommended_is_ok(self):
+        with self._registry("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    900"):
+            self.assertEqual(ccdelegate.stall_timeout_state(), (900, True))
+
+    def test_registry_malformed_value_is_treated_as_unset(self):
+        with self._registry("    DELEGATE_STALL_TIMEOUT_S    REG_SZ    not-a-number"):
+            self.assertEqual(ccdelegate.stall_timeout_state(), (None, False))
+
+    def test_environ_unset_is_not_ok(self):
+        with self._environ(None):
+            self.assertEqual(ccdelegate.stall_timeout_state(), (None, False))
+
+    def test_environ_below_recommended_is_not_ok(self):
+        with self._environ("300"):
+            self.assertEqual(ccdelegate.stall_timeout_state(), (300, False))
+
+    def test_environ_at_recommended_is_ok(self):
+        with self._environ("900"):
+            self.assertEqual(ccdelegate.stall_timeout_state(), (900, True))
+
+    def test_environ_malformed_value_is_treated_as_unset(self):
+        with self._environ("not-a-number"):
+            self.assertEqual(ccdelegate.stall_timeout_state(), (None, False))
