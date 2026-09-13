@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 11,
+    "schemaVersion": 12,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -76,16 +76,25 @@ DEFAULTS: dict[str, Any] = {
                               "maxWriteJobs": 1, "endpoint": "opencode"},
             "opencode-smart": {"worker": "cc-delegate", "profile": "opencode-smart",
                                "maxWriteJobs": 1, "endpoint": "opencode"},
-            # There are deliberately NO per-tier fallback lanes. The point of
-            # one would be an *independent* budget, which needs a model no
-            # other tier uses -- and re-probed 2026-09-13, only five models
-            # answer this endpoint at all (deepseek-v4-flash, minimax-m3,
-            # deepseek-v4-pro, deepseek-v4.1-flash, qwen3.8-max), each already
-            # owned by a tier above. Every remaining candidate 500s:
-            # gpt-5.6-luna and glm-5.3-flash join the already-known glm-5.3
-            # and kimi-k2.7-code. A fallback reusing a primary's model would
-            # share its rate limit and buy nothing. Revisit if OpenCode ships
-            # a sixth working model.
+            # A fallback lane only earns its slot on an *independent* budget,
+            # so each backs a primary from a DIFFERENT model family: a rate
+            # limit on one cannot take both down. Only two exist because only
+            # two validated models are left unassigned; a third reusing a
+            # primary's model would share its limit and buy nothing.
+            #
+            # Every model here was validated 2026-09-13 by a real multi-turn
+            # delegated task, not a probe. That distinction matters: single
+            # requests pass on models that then fail an agent loop (see
+            # deepseek-v4-flash, excluded -- it is thinking-mode and the
+            # provider requires reasoning_content replayed on the next call,
+            # which litellm does not do, so it dies on turn 2 despite the
+            # best quota on the plan at 65k req/mo).
+            "opencode-main-fallback": {"worker": "cc-delegate",
+                                       "profile": "opencode-main-fallback",
+                                       "maxWriteJobs": 1, "endpoint": "opencode"},
+            "opencode-fast-fallback": {"worker": "cc-delegate",
+                                       "profile": "opencode-fast-fallback",
+                                       "maxWriteJobs": 1, "endpoint": "opencode"},
             # Two more lanes, deliberately NOT wired into classRouting below --
             # they're for explicit/manual dispatch (pass profile="opencode-
             # bulk"/"opencode-reviewer" directly to cc-delegate's run_dev_task)
@@ -137,10 +146,14 @@ DEFAULTS: dict[str, Any] = {
             # opencode-fast is occupied, not the leader. codex still stays
             # last/absent for these classes so trivial work doesn't eat the
             # Codex slot -- see test_simple_prefers_opencode_over_codex.
-            "hard": ["codex", "opencode-smart", "station"],
-            "standard": ["codex", "opencode-main", "station"],
-            "simple": ["opencode-fast", "station", "codex"],
-            "tiny": ["opencode-fast", "station"],
+            # station is the local GPU box: excluded from hard/standard (user
+            # decision 2026-09-13 -- a 9b local model is not the lane for heavy
+            # work), kept as the last resort on the cheap classes. codex is off
+            # simple too, so the subscription is spent on hard/standard only.
+            "hard": ["codex", "opencode-smart"],
+            "standard": ["codex", "opencode-main", "opencode-main-fallback"],
+            "simple": ["opencode-fast", "opencode-fast-fallback", "station"],
+            "tiny": ["opencode-fast", "opencode-fast-fallback", "station"],
         },
         "defaultClass": "standard",
         "totalWriteJobsPerRepo": 4,
@@ -407,6 +420,14 @@ def _migrate(stored: dict) -> dict:
                 routing[task_class] = [ln for ln in lanes if ln not in dead]
         for name in dead:
             stored.get("workers", {}).get("lanes", {}).pop(name, None)
+    if have < 12:
+        # Lane membership changed on evidence, not preference-shuffling, so
+        # classRouting is replaced outright (same reasoning as v6-v9) rather
+        # than patched: station leaves hard/standard, codex leaves simple, and
+        # the two fallback lanes come back now that multi-turn validation found
+        # models for them -- v11 had removed them when none were available.
+        workers = stored.setdefault("workers", {})
+        workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]
     bak = CONFIG_PATH.with_suffix(f".v{have}."
                                   f"{time.strftime('%Y%m%d-%H%M%S')}.json")

@@ -18,6 +18,8 @@ class LaneTest(DGTest):
                       "oracle": [True, "ok"], "openrouter": [True, "ok"],
                       "opencode-fast": [True, "ok"], "opencode-main": [True, "ok"],
                       "opencode-smart": [True, "ok"],
+                      "opencode-main-fallback": [True, "ok"],
+                      "opencode-fast-fallback": [True, "ok"],
                       "opencode-bulk": [True, "ok"], "opencode-reviewer": [True, "ok"]}
         lanes.availability = lambda con, cfg, refresh=True: self.avail
 
@@ -167,14 +169,14 @@ class TestFourLaneConcurrency(LaneTest):
         self.assertEqual(placed[hard], "codex")
         self.assertEqual(placed[standard], "opencode-main")
         self.assertEqual(placed[simple], "opencode-fast")
-        # opencode-fast is taken by `simple`, and with the per-tier fallback
-        # lanes gone station is what tiny falls through to.
-        self.assertEqual(placed[tiny], "station")
+        # opencode-fast is taken by `simple`, so tiny takes its fallback lane
+        # rather than dropping straight to the slower local station.
+        self.assertEqual(placed[tiny], "opencode-fast-fallback")
         self.assertEqual(len(set(placed.values())), 4, "all four must be distinct lanes")
 
         counts = lanes.in_flight(self.con, "/repo")
         self.assertEqual(counts, {"codex": 1, "opencode-main": 1,
-                                  "opencode-fast": 1, "station": 1})
+                                  "opencode-fast": 1, "opencode-fast-fallback": 1})
 
     def test_a_fifth_task_waits(self):
         for cls, paths in (("hard", "a/**"), ("standard", "b/**"),
