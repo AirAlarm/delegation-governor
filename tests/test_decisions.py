@@ -88,3 +88,13 @@ class TestDecisions(DGTest):
         self.assertNotIn("task-1 /", output)
         self.assertIn("task-2 /", output)
         self.assertIn("task-11 /", output)
+
+
+class TestPlanDecision(DGTest):
+    def test_plan_is_a_recordable_decision_type(self):
+        record = decisions.append_decision("plan", "split site into 4 pages", "shared CSS first")
+        self.assertEqual(decisions.read_decisions(), [record])
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.main(["decisions"]), 0)
+        self.assertIn("plan: 1", stdout.getvalue())

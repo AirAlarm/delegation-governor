@@ -8,7 +8,9 @@ from typing import Any
 from . import config
 
 
-DECISION_TYPES = ("delegate", "keep", "takeover")
+# plan: how work was split, sequenced or made dependent -- the choice that
+# decides how many lanes can run at once, so it needs a record too.
+DECISION_TYPES = ("delegate", "keep", "takeover", "plan")
 
 
 def append_decision(
