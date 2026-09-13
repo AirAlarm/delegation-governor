@@ -1,7 +1,7 @@
 {
   "name": "delegation-governor",
   "displayName": "Delegation Governor",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Route implementation work to independent worker lanes with a dependency-aware task ledger.",
   "author": { "name": "AirAlarm" },
   "license": "MIT",
