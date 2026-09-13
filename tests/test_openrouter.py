@@ -61,6 +61,25 @@ class TestOpenRouterConfig(DGTest):
         self.assertEqual(migrated["workers"]["totalWriteJobsPerRepo"], 4)
         self.assertTrue(list(config.CONFIG_PATH.parent.glob("config.v3.*.json")))
 
+    def test_v12_config_moves_token_files_to_the_new_home(self):
+        config.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        config.CONFIG_PATH.write_text(json.dumps({
+            "schemaVersion": 12,
+            "workers": {"endpoints": {
+                "opencode": {"tokenFile": "~/.cc-delegate/credentials.json"},
+                "openrouter": {"tokenFile": "~/custom/keys.json"},
+            }},
+            "supervisorFallbacks": [{"name": "oracle",
+                                     "tokenFile": "~/.cc-delegate/credentials.json"}],
+        }), "utf-8")
+        migrated = config.load()
+        endpoints = migrated["workers"]["endpoints"]
+        self.assertEqual(endpoints["opencode"]["tokenFile"],
+                         "~/.delegation-governor/credentials.json")
+        self.assertEqual(endpoints["openrouter"]["tokenFile"], "~/custom/keys.json")
+        self.assertEqual(migrated["supervisorFallbacks"][0]["tokenFile"],
+                         "~/.delegation-governor/credentials.json")
+
 
 class TestOpenRouterProfile(DGTest):
     def test_missing_profile_keeps_lane_down(self):

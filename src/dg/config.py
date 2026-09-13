@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 12,
+    "schemaVersion": 13,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -428,6 +428,18 @@ def _migrate(stored: dict) -> dict:
         # models for them -- v11 had removed them when none were available.
         workers = stored.setdefault("workers", {})
         workers["classRouting"] = json.loads(json.dumps(DEFAULTS["workers"]["classRouting"]))
+    if have < 13:
+        # The home store moved from ~/.cc-delegate/ to ~/.delegation-governor/,
+        # but a stored tokenFile overrides the new default in _merge, so every
+        # keyed lane silently read a file that no longer exists and reported
+        # "set <KEY>". Only the exact old path is rewritten; a custom one stays.
+        old_path = "~/.cc-delegate/credentials.json"
+        new_path = "~/.delegation-governor/credentials.json"
+        tiers = list((stored.get("workers", {}).get("endpoints") or {}).values())
+        tiers += stored.get("supervisorFallbacks") or []
+        for t in tiers:
+            if isinstance(t, dict) and t.get("tokenFile") == old_path:
+                t["tokenFile"] = new_path
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]
     bak = CONFIG_PATH.with_suffix(f".v{have}."
                                   f"{time.strftime('%Y%m%d-%H%M%S')}.json")
