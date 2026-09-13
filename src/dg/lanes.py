@@ -189,9 +189,10 @@ def choose(con: sqlite3.Connection, cfg: dict, task: dict[str, Any],
             continue
         spec = lanes(cfg)[name]
         return {"lane": name, "worker": spec["worker"], "profile": spec.get("profile"),
-                "taskClass": task_class, "skipped": skipped,
+                "taskClass": task_class, "preference": order, "skipped": skipped,
                 "reason": f"{task_class} -> {name}"}
-    return {"lane": None, "worker": None, "taskClass": task_class, "skipped": skipped,
+    return {"lane": None, "worker": None, "taskClass": task_class,
+            "preference": order, "skipped": skipped,
             "reason": f"no lane available for a {task_class} task"}
 
 
