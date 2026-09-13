@@ -12,7 +12,7 @@ DB_PATH = HOME / "governor.db"
 LOG_DIR = HOME / "logs"
 
 DEFAULTS: dict[str, Any] = {
-    "schemaVersion": 10,
+    "schemaVersion": 11,
     # Supervisor thresholds, percent utilization of each Anthropic window (§3).
     "supervisor": {
         "fiveHour": {"save": 70, "local": 92},
@@ -76,21 +76,16 @@ DEFAULTS: dict[str, Any] = {
                               "maxWriteJobs": 1, "endpoint": "opencode"},
             "opencode-smart": {"worker": "cc-delegate", "profile": "opencode-smart",
                                "maxWriteJobs": 1, "endpoint": "opencode"},
-            # One verified-working fallback per tier, wired directly into
-            # classRouting right after its primary (see below) so the
-            # existing fallthrough mechanism handles it -- no new routing
-            # logic needed. Deliberately a *different* model family from its
-            # primary where possible, so a rate limit on one doesn't also
-            # affect the other's independent budget.
-            "opencode-main-fallback": {"worker": "cc-delegate",
-                                       "profile": "opencode-main-fallback",
-                                       "maxWriteJobs": 1, "endpoint": "opencode"},
-            "opencode-smart-fallback": {"worker": "cc-delegate",
-                                        "profile": "opencode-smart-fallback",
-                                        "maxWriteJobs": 1, "endpoint": "opencode"},
-            "opencode-fast-fallback": {"worker": "cc-delegate",
-                                       "profile": "opencode-fast-fallback",
-                                       "maxWriteJobs": 1, "endpoint": "opencode"},
+            # There are deliberately NO per-tier fallback lanes. The point of
+            # one would be an *independent* budget, which needs a model no
+            # other tier uses -- and re-probed 2026-09-13, only five models
+            # answer this endpoint at all (deepseek-v4-flash, minimax-m3,
+            # deepseek-v4-pro, deepseek-v4.1-flash, qwen3.8-max), each already
+            # owned by a tier above. Every remaining candidate 500s:
+            # gpt-5.6-luna and glm-5.3-flash join the already-known glm-5.3
+            # and kimi-k2.7-code. A fallback reusing a primary's model would
+            # share its rate limit and buy nothing. Revisit if OpenCode ships
+            # a sixth working model.
             # Two more lanes, deliberately NOT wired into classRouting below --
             # they're for explicit/manual dispatch (pass profile="opencode-
             # bulk"/"opencode-reviewer" directly to cc-delegate's run_dev_task)
@@ -142,10 +137,10 @@ DEFAULTS: dict[str, Any] = {
             # opencode-fast is occupied, not the leader. codex still stays
             # last/absent for these classes so trivial work doesn't eat the
             # Codex slot -- see test_simple_prefers_opencode_over_codex.
-            "hard": ["codex", "opencode-smart", "opencode-smart-fallback", "station"],
-            "standard": ["codex", "opencode-main", "opencode-main-fallback", "station"],
-            "simple": ["opencode-fast", "opencode-fast-fallback", "station", "codex"],
-            "tiny": ["opencode-fast", "opencode-fast-fallback", "station"],
+            "hard": ["codex", "opencode-smart", "station"],
+            "standard": ["codex", "opencode-main", "station"],
+            "simple": ["opencode-fast", "station", "codex"],
+            "tiny": ["opencode-fast", "station"],
         },
         "defaultClass": "standard",
         "totalWriteJobsPerRepo": 4,
@@ -398,6 +393,20 @@ def _migrate(stored: dict) -> dict:
             for primary, fallback in fallback_of.items():
                 if primary in current and fallback not in current:
                     current.insert(current.index(primary) + 1, fallback)
+    if have < 11:
+        # Undoes v10. Those fallback lanes needed a model no other tier used,
+        # and re-probing found only five models answer this endpoint at all --
+        # every one already owned by a primary tier (see the lanes comment).
+        # Subtractive, so it edits the user's list in place rather than
+        # replacing it: an entry a user added themselves is left alone.
+        routing = stored.setdefault("workers", {}).get("classRouting") or {}
+        dead = {"opencode-main-fallback", "opencode-smart-fallback",
+                "opencode-fast-fallback"}
+        for task_class, lanes in routing.items():
+            if isinstance(lanes, list):
+                routing[task_class] = [ln for ln in lanes if ln not in dead]
+        for name in dead:
+            stored.get("workers", {}).get("lanes", {}).pop(name, None)
     stored["schemaVersion"] = DEFAULTS["schemaVersion"]
     bak = CONFIG_PATH.with_suffix(f".v{have}."
                                   f"{time.strftime('%Y%m%d-%H%M%S')}.json")

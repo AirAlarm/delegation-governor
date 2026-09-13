@@ -55,7 +55,7 @@ class TestOpenRouterConfig(DGTest):
             },
         }), "utf-8")
         migrated = config.load()
-        self.assertEqual(migrated["schemaVersion"], 10)
+        self.assertEqual(migrated["schemaVersion"], config.DEFAULTS["schemaVersion"])
         self.assertEqual(migrated["workers"]["classRouting"],
                          config.DEFAULTS["workers"]["classRouting"])
         self.assertEqual(migrated["workers"]["totalWriteJobsPerRepo"], 4)
