@@ -74,7 +74,12 @@ If the standalone `cc-delegate` plugin is also installed, `dg-worker` and it
 are independent -- each reads/writes the same `~/.cc-delegate/` state, so
 running both is redundant but not conflicting.
 
-## Install
+## Install (Windows only)
+
+The managed flow below is Windows-only: `dg install` and `dg install --proxy`
+raise on other platforms, and the paths are `.venv/Scripts/...`. On macOS and
+Linux use [Install as a Claude Code plugin](#install-as-a-claude-code-plugin)
+instead.
 
 ```bash
 git clone <this repo> && cd delegation-governor
@@ -366,8 +371,11 @@ through when one is busy, unconfigured, out of credit, or down.
 | `exceed_context_size_error` on LOCAL | load the configured LM Studio model with at least the configured context |
 | cc-delegate times out while LOCAL | both share one LM Studio model slot - see the `dg doctor` warning; delegate to Codex or an `oracle-*` profile instead |
 | Worker seems hung | `dg worker-status` - `SLOW` is normal for a cold local model |
+| `dg-worker` MCP server `CONNECTION_CLOSED` | the checkout was opened as a project instead of installed; `${CLAUDE_PLUGIN_ROOT}` is only set for installed plugins, so use `claude plugin install` (or `claude --plugin-dir`) |
 
-## Upgrade
+## Upgrade (Windows only)
+
+Plugin installs upgrade with `claude plugin update delegation-governor`.
 
 ```bash
 git pull && uv pip install --python .venv/Scripts/python.exe -e .

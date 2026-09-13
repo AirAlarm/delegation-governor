@@ -44,7 +44,7 @@ from persistence import (
 )
 from proc_utils import kill_tree
 
-WORKER_SCRIPT = str(Path(__file__).resolve().parent.parent / "worker" / "worker.py")
+WORKER_SCRIPT = str(Path(__file__).resolve().parent.parent / "worker_runtime" / "worker.py")
 
 
 def comm_dir_for(job: dict[str, Any], work_dir: str) -> Path:

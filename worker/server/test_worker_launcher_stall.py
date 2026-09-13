@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import Config
 from jobs import create_worktree, runtime
-from worker_launcher import run_worker
+from worker_launcher import WORKER_SCRIPT, run_worker
 
 _REAL_CREATE_SUBPROCESS_EXEC = asyncio.create_subprocess_exec
 
@@ -159,6 +159,13 @@ class TestStallWatchdog(_MockSubprocessCase):
         self.assertEqual(job["status"], "succeeded")
         self.assertEqual(job["costUsd"], 0.01)
         runtime.pop(job["taskId"], None)
+
+
+class WorkerScriptPathTest(unittest.TestCase):
+    def test_worker_script_exists(self):
+        # Every other test here mocks the subprocess, so a wrong WORKER_SCRIPT
+        # path fails only at runtime as "worker produced no result line".
+        self.assertTrue(Path(WORKER_SCRIPT).is_file(), WORKER_SCRIPT)
 
 
 if __name__ == "__main__":
