@@ -32,6 +32,7 @@ import sys
 import tempfile
 import time
 import uuid
+from urllib.parse import urlparse
 
 import litellm
 
@@ -565,26 +566,48 @@ def _bare_model(model_str: str) -> str:
     return model_str.split(":", 1)[-1] if ":" in model_str else model_str
 
 
-def build_model(model_str: str, fallback_models: list[str] | None):
+def opencode_headers(api_base: str | None, session_id: str) -> dict[str, str] | None:
+    """OpenCode Go rejects /v1/messages without ``x-opencode-session`` (HTTP 400
+    ``MissingSessionID``), so every request in one delegated task carries the
+    task's own id. Other endpoints get no extra headers.
+
+    Matched on the parsed host, not a substring, so a lookalike base URL like
+    ``https://opencode.ai.example.com`` doesn't collect the header.
+    """
+    if not api_base:
+        return None
+    host = (urlparse(api_base).hostname or "").lower()
+    if host != "opencode.ai" and not host.endswith(".opencode.ai"):
+        return None
+    return {"x-opencode-session": session_id}
+
+
+def build_model(model_str: str, fallback_models: list[str] | None,
+                extra_headers: dict[str, str] | None = None):
     """Return what to hand create_deep_agent's ``model=`` argument.
 
-    With no fallbacks configured (the default, common case), this is just the
-    bare model STRING — unchanged behavior, resolved by deepagents' own
-    ``init_chat_model``. With fallbacks, construct a ``ChatLiteLLM`` instance
+    With neither fallbacks nor extra headers (the default, common case), this
+    is just the bare model STRING — unchanged behavior, resolved by deepagents'
+    own ``init_chat_model``. Otherwise construct a ``ChatLiteLLM`` instance
     directly instead: ``model_kwargs`` is spread verbatim into every
-    ``litellm.completion(...)`` call, and litellm's own ``fallbacks`` kwarg
-    triggers ``completion_with_fallbacks`` — tried in order if the primary
-    model's call fails. Bypassing deepagents' string-based resolution is the
-    only way to reach this litellm-level parameter.
+    ``litellm.completion(...)`` call, so it carries both litellm's own
+    ``fallbacks`` kwarg (triggering ``completion_with_fallbacks``, tried in
+    order if the primary model's call fails) and per-request ``extra_headers``.
+    Bypassing deepagents' string-based resolution is the only way to reach
+    these litellm-level parameters. The module-level ``litellm.headers`` global
+    is NOT an alternative — verified live, it is ignored by the anthropic
+    provider that OpenCode Go is reached through.
     """
-    if not fallback_models:
+    if not fallback_models and not extra_headers:
         return model_str
     from langchain_litellm import ChatLiteLLM
 
-    return ChatLiteLLM(
-        model=_bare_model(model_str),
-        model_kwargs={"fallbacks": [_bare_model(fm) for fm in fallback_models]},
-    )
+    model_kwargs = {}
+    if fallback_models:
+        model_kwargs["fallbacks"] = [_bare_model(fm) for fm in fallback_models]
+    if extra_headers:
+        model_kwargs["extra_headers"] = extra_headers
+    return ChatLiteLLM(model=_bare_model(model_str), model_kwargs=model_kwargs)
 
 
 def main() -> int:
@@ -609,6 +632,10 @@ def main() -> int:
                          "running unbounded.")
     p.add_argument("--api-base", default=None,
                     help="station patch: custom base URL for --model's litellm provider.")
+    p.add_argument("--session-id", default=None,
+                    help="Session id for endpoints that require one (OpenCode Go's "
+                         "x-opencode-session). Defaults to a fresh id; the server passes "
+                         "the dg task id so provider-side sessions match the ledger.")
     args = p.parse_args()
     fallback_models = [m.strip() for m in args.fallback_models.split(",") if m.strip()] if args.fallback_models else None
 
@@ -654,7 +681,10 @@ def main() -> int:
     # by design; on_evaluation is the documented way to observe the grader's
     # verdict without a checkpointer.
     rubric_evaluations: list[dict] = []
-    model = build_model(args.model, fallback_models)
+    model = build_model(
+        args.model, fallback_models,
+        opencode_headers(args.api_base, args.session_id or uuid.uuid4().hex),
+    )
     agent = create_deep_agent(
         model=model,
         tools=[report_progress, ask_supervisor, report_blocker],

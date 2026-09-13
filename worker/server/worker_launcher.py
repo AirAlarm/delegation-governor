@@ -51,13 +51,14 @@ def comm_dir_for(job: dict[str, Any], work_dir: str) -> Path:
     return Path(job["repo"]) / work_dir / "comm" / job["taskId"]
 
 
-def _build_args(cfg: Config, args: dict[str, Any]) -> list[str]:
+def _build_args(cfg: Config, args: dict[str, Any], session_id: str) -> list[str]:
     # Model and key env var are resolved per task (config_store profile or
     # legacy env defaults) and passed in via `args` by main.py.
     cli = [
         "run", WORKER_SCRIPT,
         "--worktree", args["worktree"],
         "--spec", args["spec"],
+        "--session-id", session_id,
         "--model", args.get("model") or cfg.model,
         "--api-key-env-var", args.get("api_key_env_var") or cfg.api_key_env_var,
         "--recursion-limit", str(args["recursion_limit"]),
@@ -124,7 +125,7 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "uv", *_build_args(cfg, args),
+            "uv", *_build_args(cfg, args, job["taskId"]),
             # stdin MUST be detached: this server's own stdin is the MCP
             # protocol channel, and an inheriting child steals protocol bytes.
             stdin=asyncio.subprocess.DEVNULL,

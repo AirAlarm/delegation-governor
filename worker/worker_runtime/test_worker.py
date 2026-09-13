@@ -56,6 +56,58 @@ class TestBuildModel(unittest.TestCase):
         self.assertEqual(worker._bare_model("litellm:minimax/MiniMax-M3"), "minimax/MiniMax-M3")
         self.assertEqual(worker._bare_model("no-prefix-model"), "no-prefix-model")
 
+    def test_extra_headers_alone_build_a_chatlitellm_instance(self):
+        # Without this, headers would be silently dropped: the no-fallback path
+        # returns a bare string that deepagents resolves with no way to attach
+        # per-request headers.
+        model = worker.build_model(
+            "litellm:anthropic/minimax-m3", None, {"x-opencode-session": "t_abc123"},
+        )
+        from langchain_litellm import ChatLiteLLM
+
+        self.assertIsInstance(model, ChatLiteLLM)
+        self.assertEqual(
+            model.model_kwargs["extra_headers"], {"x-opencode-session": "t_abc123"},
+        )
+        self.assertNotIn("fallbacks", model.model_kwargs)
+
+    def test_headers_and_fallbacks_coexist(self):
+        model = worker.build_model(
+            "litellm:anthropic/minimax-m3",
+            ["litellm:anthropic/deepseek-v4-pro"],
+            {"x-opencode-session": "t_abc123"},
+        )
+        self.assertEqual(model.model_kwargs["fallbacks"], ["anthropic/deepseek-v4-pro"])
+        self.assertEqual(
+            model.model_kwargs["extra_headers"], {"x-opencode-session": "t_abc123"},
+        )
+
+
+class TestOpencodeHeaders(unittest.TestCase):
+    def test_opencode_host_gets_the_session_header(self):
+        self.assertEqual(
+            worker.opencode_headers("https://opencode.ai/zen/go", "t_abc123"),
+            {"x-opencode-session": "t_abc123"},
+        )
+
+    def test_subdomain_of_opencode_is_matched(self):
+        self.assertEqual(
+            worker.opencode_headers("https://api.opencode.ai/zen/go", "t_1"),
+            {"x-opencode-session": "t_1"},
+        )
+
+    def test_lookalike_host_gets_no_header(self):
+        # Substring matching would leak the session id to an attacker-controlled
+        # host; the check is on the parsed hostname.
+        for base in ("https://opencode.ai.example.com/v1",
+                     "https://notopencode.ai/v1",
+                     "https://evil.com/?x=opencode.ai"):
+            self.assertIsNone(worker.opencode_headers(base, "t_1"), base)
+
+    def test_other_endpoints_and_no_api_base_get_no_header(self):
+        self.assertIsNone(worker.opencode_headers("http://127.0.0.1:1234", "t_1"))
+        self.assertIsNone(worker.opencode_headers(None, "t_1"))
+
 
 class TestDangerousGitGuard(unittest.TestCase):
     def _blocked(self, cmd: str) -> bool:
