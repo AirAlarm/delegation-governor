@@ -12,7 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import config, decisions, gitutil, quota_codex, routing, scheduler, store, supervisor, sync
+from . import config, decisions, gitutil, quota_codex, routelog, routing, scheduler, store
+from . import supervisor, sync
 from . import quickread, safewrite, workorder
 from .workers import cc_delegate
 from .workers import codex_plugin
@@ -264,16 +265,21 @@ def cmd_dispatch(args) -> int:
     else:
         lane_choice = routing.select_for(con, cfg, t)
     if lane_choice["worker"] is None:
+        _append_route("dispatch", t, lane_choice, lanes_mod.in_flight(con, t["repo"]),
+                      "no_lane", forced_worker=args.worker)
         print(f"{args.id}: {lane_choice['reason']}", file=sys.stderr)
         for sk in lane_choice.get("skipped", []):
             print(f"  {sk}", file=sys.stderr)
         return 6
     worker = lane_choice["worker"]
+    in_flight = lanes_mod.in_flight(con, t["repo"])
     reservation = store.reserve_attempt(
         con, t["id"], _session_id(), worker, lane_choice["lane"], cfg,
         profile=lane_choice.get("profile"),
         transport="codex-plugin" if worker == routing.CODEX else "cc-delegate-mcp")
     if not reservation["ok"]:
+        _append_route("dispatch", t, lane_choice, in_flight, "reservation_failed",
+                      forced_worker=args.worker)
         print(f"{args.id}: {reservation['reason']}", file=sys.stderr)
         return 4
     attempt_id = reservation["attemptId"]
@@ -283,6 +289,8 @@ def cmd_dispatch(args) -> int:
         # cc-delegate creates its own worktree from this repo, so the order
         # must not claim the repo path itself is one.
         order = _order(t, args, "the isolated git worktree cc-delegate places you in")
+        _append_route("dispatch", t, lane_choice, in_flight, "reserved",
+                      forced_worker=args.worker, attempt_id=attempt_id)
         print(json.dumps({"worker": "cc-delegate", "action": "call mcp run_dev_task",
                           "taskId": t["id"], "repo": t["repo"],
                           "lane": lane_choice.get("lane"),
@@ -297,9 +305,13 @@ def cmd_dispatch(args) -> int:
     order = _order(t, args, "(the working directory below)")
     res = codex_plugin.dispatch(con, t, order, attempt_id)
     if not res.get("ok"):
+        _append_route("dispatch", t, lane_choice, in_flight, "dispatch_failed",
+                      forced_worker=args.worker, attempt_id=attempt_id)
         store.release_reservation(con, args.id)
         print(res.get("error", "dispatch failed"), file=sys.stderr)
         return 5
+    _append_route("dispatch", t, lane_choice, in_flight, "reserved",
+                  forced_worker=args.worker, attempt_id=attempt_id)
     res["task"] = args.id
     res["lane"] = lane_choice.get("lane")
     res["taskClass"] = lane_choice.get("taskClass")
@@ -307,6 +319,31 @@ def cmd_dispatch(args) -> int:
     res["nextReady"] = [r["id"] for r in scheduler.ready(scheduler.evaluate(con, cfg)["tasks"])]
     res["freeLanes"] = lanes_mod.free_lanes(con, cfg, t["repo"])
     return _emit(res, True)
+
+
+def _append_route(source: str, task: dict[str, Any], choice: dict[str, Any],
+                  in_flight: dict[str, int], outcome: str,
+                  forced_worker: str | None = None,
+                  attempt_id: int | None = None) -> dict[str, Any]:
+    lane = choice["lane"]
+    preference = choice["preference"]
+    rank = preference.index(lane) if lane in preference else None
+    return routelog.append_route({
+        "source": source,
+        "task_id": task["id"],
+        "repo": task["repo"],
+        "mode": task["mode"],
+        "task_class": choice["taskClass"],
+        "preference": preference,
+        "lane": lane,
+        "rank": rank,
+        "worker": choice["worker"],
+        "skipped": choice["skipped"],
+        "in_flight": in_flight,
+        "forced_worker": forced_worker,
+        "attempt_id": attempt_id,
+        "outcome": outcome,
+    })
 
 
 def _order(t, args, cwd) -> str:
@@ -758,6 +795,9 @@ def cmd_fill(args) -> int:
         task = candidates[0]
         choice = lanes_mod.choose(con, cfg, task, avail)
         if choice["lane"] is None:
+            if not args.dry_run:
+                _append_route("fill", task, choice,
+                              lanes_mod.in_flight(con, task["repo"]), "no_lane")
             skipped.append({"task": task["id"], "reason": choice["reason"],
                             "detail": choice["skipped"]})
             continue
@@ -766,12 +806,14 @@ def cmd_fill(args) -> int:
         if args.dry_run:
             started.append(entry)
             continue
+        in_flight = lanes_mod.in_flight(con, task["repo"])
         reservation = store.reserve_attempt(
             con, task["id"], _session_id(), choice["worker"], choice["lane"], cfg,
             profile=choice.get("profile"),
             transport="codex-plugin" if choice["worker"] == routing.CODEX
             else "cc-delegate-mcp")
         if not reservation["ok"]:
+            _append_route("fill", task, choice, in_flight, "reservation_failed")
             skipped.append({"task": task["id"], "reason": reservation["reason"]})
             continue
         attempt_id = reservation["attemptId"]
@@ -784,13 +826,18 @@ def cmd_fill(args) -> int:
             entry["then"] = (f"dg attach {task['id']} <cc-task-id> "
                              f"--attempt {attempt_id}")
             handoff.append(entry)
+            _append_route("fill", task, choice, in_flight, "reserved",
+                          attempt_id=attempt_id)
             continue
         order = workorder.build(task, cwd="(the working directory below)")
         res = codex_plugin.dispatch(con, task, order, attempt_id)
         if not res.get("ok"):
+            _append_route("fill", task, choice, in_flight, "dispatch_failed",
+                          attempt_id=attempt_id)
             store.release_reservation(con, task["id"])
             skipped.append({"task": task["id"], "reason": res.get("error", "dispatch failed")})
             continue
+        _append_route("fill", task, choice, in_flight, "reserved", attempt_id=attempt_id)
         entry.update(jobId=res.get("jobId"), worktree=res.get("worktree"))
         started.append(entry)
         lanes_mod.invalidate(con)
@@ -827,6 +874,11 @@ def cmd_lanes(args) -> int:
                    f"{','.join(r['classes']):<24} {r['profile'] or r['worker']:<14} "
                    f"{'' if r['available'] else r['reason']}")
     return _emit(None, False, chr(10).join(out))
+
+
+def cmd_distribution(args) -> int:
+    from . import distribution
+    return distribution.run(args)
 
 
 def cmd_proxy(args) -> int:
@@ -1047,6 +1099,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = add("lanes", cmd_lanes, help="worker lanes: capacity, availability, classes")
     s.add_argument("--repo", default="")
+    s.add_argument("--json", action="store_true")
+
+    s = add("distribution", cmd_distribution,
+            help="lane distribution and balance report")
+    s.add_argument("--repo", default="")
+    s.add_argument("--since", type=float, default=0,
+                   help="include routing decisions from the last N hours (0 = all)")
     s.add_argument("--json", action="store_true")
 
     s = add("quickread", quickread.run,
