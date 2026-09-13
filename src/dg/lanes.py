@@ -49,12 +49,12 @@ def _norm_repo(repo: str) -> str:
     return os.path.abspath(repo) if repo else ""
 
 
-def in_flight(con: sqlite3.Connection, repo: str) -> dict[str, int]:
-    """Reserved or running WRITE attempts per lane in this repo."""
-    repo = _norm_repo(repo)
+def in_flight(con: sqlite3.Connection, repo: str | None = None) -> dict[str, int]:
+    """Reserved or running WRITE attempts per lane, in one repo or (None) all of them."""
+    repo = None if repo is None else _norm_repo(repo)
     counts: dict[str, int] = {}
     for a in store.running_attempts(con):
-        if a["task_mode"] != "WRITE" or a["repo"] != repo:
+        if a["task_mode"] != "WRITE" or (repo is not None and a["repo"] != repo):
             continue
         lane = a["lane"] or _lane_for_worker(a["worker"])
         counts[lane] = counts.get(lane, 0) + 1
@@ -70,11 +70,13 @@ def has_capacity(con: sqlite3.Connection, lane: str, repo: str, cfg: dict) -> bo
     spec = lanes(cfg).get(lane)
     if spec is None:
         return False
-    counts = in_flight(con, _norm_repo(repo))
-    if counts.get(lane, 0) >= spec.get("maxWriteJobs", 1):
+    # A lane is a machine or an account, so its slots are shared by every repo;
+    # only the total budget is per repo. Counting the lane per repo let a
+    # maxWriteJobs=1 lane run one job in each repo at once (seen live: codex
+    # and opencode-main each double-booked across two repos).
+    if in_flight(con).get(lane, 0) >= spec.get("maxWriteJobs", 1):
         return False
-    total = sum(counts.values())
-    return total < cfg["workers"]["totalWriteJobsPerRepo"]
+    return sum(in_flight(con, repo).values()) < cfg["workers"]["totalWriteJobsPerRepo"]
 
 
 # ---------------------------------------------------------------- availability
@@ -207,7 +209,7 @@ def free_lanes(con: sqlite3.Connection, cfg: dict, repo: str,
 
 def summary(con: sqlite3.Connection, cfg: dict, repo: str = "") -> list[dict[str, Any]]:
     avail = availability(con, cfg)
-    counts = in_flight(con, repo) if repo else {}
+    counts = in_flight(con)
     out = []
     for name, spec in lanes(cfg).items():
         ok, reason = avail.get(name, [True, "unprobed"])

@@ -265,14 +265,14 @@ def cmd_dispatch(args) -> int:
     else:
         lane_choice = routing.select_for(con, cfg, t)
     if lane_choice["worker"] is None:
-        _append_route("dispatch", t, lane_choice, lanes_mod.in_flight(con, t["repo"]),
+        _append_route("dispatch", t, lane_choice, lanes_mod.in_flight(con),
                       "no_lane", forced_worker=args.worker)
         print(f"{args.id}: {lane_choice['reason']}", file=sys.stderr)
         for sk in lane_choice.get("skipped", []):
             print(f"  {sk}", file=sys.stderr)
         return 6
     worker = lane_choice["worker"]
-    in_flight = lanes_mod.in_flight(con, t["repo"])
+    in_flight = lanes_mod.in_flight(con)
     reservation = store.reserve_attempt(
         con, t["id"], _session_id(), worker, lane_choice["lane"], cfg,
         profile=lane_choice.get("profile"),
@@ -797,7 +797,7 @@ def cmd_fill(args) -> int:
         if choice["lane"] is None:
             if not args.dry_run:
                 _append_route("fill", task, choice,
-                              lanes_mod.in_flight(con, task["repo"]), "no_lane")
+                              lanes_mod.in_flight(con), "no_lane")
             skipped.append({"task": task["id"], "reason": choice["reason"],
                             "detail": choice["skipped"]})
             continue
@@ -806,7 +806,7 @@ def cmd_fill(args) -> int:
         if args.dry_run:
             started.append(entry)
             continue
-        in_flight = lanes_mod.in_flight(con, task["repo"])
+        in_flight = lanes_mod.in_flight(con)
         reservation = store.reserve_attempt(
             con, task["id"], _session_id(), choice["worker"], choice["lane"], cfg,
             profile=choice.get("profile"),

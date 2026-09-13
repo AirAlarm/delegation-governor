@@ -135,9 +135,32 @@ class TestCapacity(LaneTest):
         self.occupy("station", paths=("b/**",))
         self.assertEqual(lanes.free_lanes(self.con, self.cfg, "/repo", self.avail), [])
 
-    def test_other_repos_do_not_consume_the_budget(self):
+    def test_other_repos_do_not_consume_the_per_repo_budget(self):
+        self.cfg["workers"]["totalWriteJobsPerRepo"] = 1
         self.occupy("codex", repo="/other", paths=("a/**",))
-        self.assertTrue(lanes.has_capacity(self.con, "codex", "/repo", self.cfg))
+        self.assertTrue(lanes.has_capacity(self.con, "station", "/repo", self.cfg))
+
+    def test_a_lane_busy_in_another_repo_is_at_capacity(self):
+        """A lane is a machine or account: its slot is shared by every repo."""
+        self.occupy("codex", repo="/other", paths=("a/**",))
+        self.assertFalse(lanes.has_capacity(self.con, "codex", "/repo", self.cfg))
+        out = self.choose(self.task(task_class="hard"))
+        self.assertEqual(out["lane"], "opencode-smart")
+        self.assertIn("codex: at capacity", out["skipped"])
+
+    def test_reservation_refuses_a_lane_busy_in_another_repo(self):
+        """The atomic check must agree with routing, or two sessions racing
+        from different repos still double-book the lane."""
+        self.occupy("codex", repo="/other", paths=("a/**",))
+        tid = self.task(task_class="hard")
+        out = store.reserve_attempt(self.con, tid, "s", "codex", "codex", self.cfg)
+        self.assertFalse(out["ok"])
+        self.assertIn("codex capacity 1/1", out["reason"])
+
+    def test_lane_summary_counts_every_repo(self):
+        self.occupy("codex", repo="/other", paths=("a/**",))
+        row = next(r for r in lanes.summary(self.con, self.cfg, "/repo") if r["lane"] == "codex")
+        self.assertEqual(row["running"], 1)
 
     def test_legacy_attempts_without_a_lane_still_count(self):
         tid = self.task("old", paths=("a/**",))

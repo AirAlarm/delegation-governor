@@ -412,7 +412,9 @@ def reserve_attempt(
                 return {"ok": False,
                         "reason": f"write capacity {len(same_repo)}/{total_limit} in repo"}
             lane_limit = int(cfg["workers"]["lanes"][lane].get("maxWriteJobs", 1))
-            lane_used = sum(1 for a in same_repo if a["lane"] == lane)
+            # Lane slots are shared across repos (see lanes.has_capacity).
+            lane_used = sum(1 for a in active_rows
+                            if a["mode"] == "WRITE" and a["lane"] == lane)
             if lane_used >= lane_limit:
                 return {"ok": False, "reason": f"{lane} capacity {lane_used}/{lane_limit}"}
             for other in same_repo:
