@@ -282,6 +282,10 @@ async def run_worker(cfg: Config, job: dict[str, Any], args: dict[str, Any], tim
     job["summary"] = result.get("summary")
     job["costUsd"] = result.get("cost_usd")
     job["totalTokens"] = result.get("total_tokens")
+    # Set when the run succeeded but the rubric grader errored, so the task is
+    # done yet unverified. Both this layer and fetch_task_result copy fields by
+    # name, so an unpropagated warning is a silently dropped one.
+    job["ungraded"] = result.get("ungraded")
     job.pop("question", None)
 
     if result.get("status") == "succeeded" and not rt.get("cancelled"):

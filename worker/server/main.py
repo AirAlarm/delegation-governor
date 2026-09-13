@@ -193,6 +193,11 @@ async def get_task_status(task_id: str) -> str:
         payload["next"] = "fetch_task_result(task_id)"
     if j.get("error"):
         payload["error"] = j["error"]
+    if j.get("ungraded"):
+        # A "succeeded" that was never actually verified. Surfaced on the cheap
+        # liveness call too, because a supervisor that sees succeeded here may
+        # never call fetch_task_result and would otherwise miss the caveat.
+        payload["ungraded"] = j["ungraded"]
     return json.dumps(payload)
 
 
@@ -264,6 +269,7 @@ async def fetch_task_result(task_id: str) -> str:
             "worktree": j.get("worktree"),
             "salvaged": j.get("salvaged", False),
             "error": j.get("error"),
+            "ungraded": j.get("ungraded"),
         }
     )
 

@@ -610,6 +610,26 @@ def build_model(model_str: str, fallback_models: list[str] | None,
     return ChatLiteLLM(model=_bare_model(model_str), model_kwargs=model_kwargs)
 
 
+def rubric_verdict(rubric_status: str | None) -> tuple[str, str | None, str | None]:
+    """Turn a rubric evaluation into ``(status, error, ungraded)``.
+
+    ``grader_error`` means the grader itself failed to run — it is not a verdict
+    on the work. Calling that a failure marks a finished, correct task ``failed``
+    and buries its diff in the salvage path, which is what OpenCode Go lanes hit
+    on every graded run. Such a run is reported ``succeeded`` with ``ungraded``
+    set, so "done but never verified" stays distinguishable from a real pass
+    instead of being silently upgraded to one.
+    """
+    if rubric_status == "satisfied":
+        return "succeeded", None, None
+    if rubric_status == "grader_error":
+        return "succeeded", None, (
+            "rubric grader errored; work completed but was NOT verified against "
+            "the rubric -- review the diff before integrating"
+        )
+    return "failed", f"rubric not satisfied: {rubric_status}", None
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--worktree", required=True)
@@ -711,6 +731,7 @@ def main() -> int:
         "turns": 0,
         "error": None,
         "rubric_status": None,
+        "ungraded": None,
         "cost_usd": None,
         "total_tokens": None,
     }
@@ -771,9 +792,9 @@ def main() -> int:
                 f"${args.max_budget_usd:.2f} cap; stopped early instead of running unbounded"
             )
         elif rubric:
-            result["status"] = "succeeded" if result["rubric_status"] == "satisfied" else "failed"
-            if result["status"] == "failed":
-                result["error"] = f"rubric not satisfied: {result['rubric_status']}"
+            result["status"], result["error"], result["ungraded"] = rubric_verdict(
+                result["rubric_status"]
+            )
         else:
             result["status"] = "succeeded"
     except Exception as e:  # noqa: BLE001 - surface any failure to the supervisor as a structured result

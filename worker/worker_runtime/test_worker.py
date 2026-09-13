@@ -109,6 +109,33 @@ class TestOpencodeHeaders(unittest.TestCase):
         self.assertIsNone(worker.opencode_headers(None, "t_1"))
 
 
+class TestRubricVerdict(unittest.TestCase):
+    def test_satisfied_succeeds_cleanly(self):
+        self.assertEqual(worker.rubric_verdict("satisfied"), ("succeeded", None, None))
+
+    def test_grader_error_succeeds_but_is_flagged_ungraded(self):
+        # The regression this guards: a grader that fails to RUN is not a
+        # verdict, and must not mark finished work `failed`.
+        status, error, ungraded = worker.rubric_verdict("grader_error")
+        self.assertEqual(status, "succeeded")
+        self.assertIsNone(error)
+        self.assertIn("NOT verified", ungraded)
+
+    def test_real_unsatisfied_verdict_still_fails(self):
+        # The other half: a grader that ran and said no must still fail, or the
+        # fix above would turn the rubric into a no-op.
+        status, error, ungraded = worker.rubric_verdict("unsatisfied")
+        self.assertEqual(status, "failed")
+        self.assertIn("unsatisfied", error)
+        self.assertIsNone(ungraded)
+
+    def test_unknown_or_missing_status_fails_closed(self):
+        for bad in (None, "weird_new_status"):
+            status, error, ungraded = worker.rubric_verdict(bad)
+            self.assertEqual(status, "failed", bad)
+            self.assertIsNone(ungraded, bad)
+
+
 class TestDangerousGitGuard(unittest.TestCase):
     def _blocked(self, cmd: str) -> bool:
         return bool(worker._DANGEROUS_GIT_RE.search(cmd))
