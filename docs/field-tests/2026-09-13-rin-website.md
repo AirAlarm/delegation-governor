@@ -14,13 +14,18 @@ Raw records: `dg decisions` (supervisor decisions, `~/.claude/delegation-governo
 | F1 | high | Saved config kept `tokenFile: ~/.cc-delegate/credentials.json` after the home-store move (56564aa); `_merge` lets it override the default, so all 7 OpenCode lanes reported `set OPENCODE_GO_API_KEY` with the key present. | fixed: schema v13 migration (d008f61) |
 | F2 | low | A session opened in this repo loads the root `.mcp.json` as a *project* server; `${CLAUDE_PLUGIN_ROOT}` is unexpanded there, so a second `dg-worker` fails with CONNECTION_CLOSED. The plugin copy connects fine. Misread by the supervisor as "worker down". | open: document, or name the dev-repo server differently |
 | F3 | low | `TestStallTimeout` faked only the Windows `reg query` branch; on macOS 2 failed, 2 passed by coincidence. | fixed (8822bf3) |
-| F4 | high | Lane choices (`preference`, skipped lanes + reasons, rank) only existed in `dg fill` stdout — no way to audit distribution or balance afterwards. | in progress: `routing.jsonl` (delegation-governor-1) + `dg distribution` (delegation-governor-2/3) |
+| F4 | high | Lane choices (`preference`, skipped lanes + reasons, rank) only existed in `dg fill` stdout — no way to audit distribution or balance afterwards. | fixed: `routing.jsonl` (045d5a8), `dg distribution` (de3cd67, attempt-status fix 8b3db3f) |
 | F5 | high | **Lane capacity was per repo, not per lane.** `has_capacity` counts in-flight attempts per repo, so `maxWriteJobs: 1` lanes were double-booked across repos: codex ran rin-website-2 + delegation-governor-1, opencode-main ran rin-website-3 + delegation-governor-2 at the same time. Contradicts `lanes.py`'s "a lane is a machine". | fixed: lane slots counted across all repos in routing, reservation and `dg lanes`; `totalWriteJobsPerRepo` stays per repo; routing-log `in_flight` is now global |
 | F6 | medium | Worktree location differs by lane: codex → `~/.claude/delegation-governor/worktrees/…`, cc-delegate → `<repo>/.cc-delegate/worktrees/…` (must be gitignored in every target repo). Confused the user ("why is it outside the project?"). | open |
 | F7 | medium | `dg integrate` does not merge; it verifies and tells the supervisor to merge/cherry-pick first. Codex lane commits in its worktree (`feat(dg): …`); cc-delegate lane leaves changes staged + a `.diff` in `.cc-delegate/patches/`. Two integration paths. | open |
 | F8 | medium | opencode-main (minimax-m3) returned delegation-governor-2 without the required test file, with a filler summary ("I'll start by exploring…"), 1.67M tokens, and `rubric grader errored` → reported `succeeded`. The test_command did not require the new test file to exist, so the gate passed on the old suite. | mitigated: test_command now asserts the file exists; fix re-routed to opencode-smart |
 | F9 | low | Skill says "`dg <cmd> --json` everywhere", but `dg add` rejects `--json` in both positions. | open |
 | F10 | low | New CLI features are unusable by the supervisor until a release: `dg` is an editable install of the *plugin cache* (`…/cache/…/0.7.0/src`), not the repo. `dg decision --type plan` failed until run via `PYTHONPATH=src`. | open |
+| F11 | medium | A supervisor acceptance gate caused out-of-scope edits: rin-website-3's test_command required every local href to resolve, but its worktree branched before price/gallery were merged, so the worker created 13-line `price.html`/`gallery.html` stubs outside its owned paths. Nothing enforces path ownership on cc-delegate output. | open: enforce owned paths at integrate (reject/strip other files); supervisor: gate only on owned files |
+| F12 | medium | cc-delegate `fetch_task_result.summary` is the worker's *first* message (a thinking block or "I'll start by exploring…"), not its final summary — on every OpenCode task this session. | open |
+| F13 | medium | `rubric grader errored` on all 4 OpenCode tasks (known: RubricMiddleware broken on OpenCode), so every result reports `succeeded` unverified. | open |
+| F14 | medium | Integration friction: `dg integrate` creates the worker commit lazily on its first call, so a merge before that merges nothing (price page silently missing); a supervisor who edits during review changes the patch-id and verification never passes — needed `git merge -s ours <worker-branch>` to record it. | open |
+| F15 | low | Worker tests (delegation-governor-3) passed only by test order: a fake `dg.routelog` injected via `sys.modules` was ignored once the real module was imported, and a tearDown popped the real module. Caught in review, not by the worker's gate. | fixed in review (8b3db3f) |
 
 ## Supervisor orchestration decisions
 
@@ -39,10 +44,18 @@ Raw records: `dg decisions` (supervisor decisions, `~/.claude/delegation-governo
 | rin-website-1 landing + CSS/JS | hard | codex | 682 s, integrated |
 | delegation-governor-1 routing log | standard | codex | shared codex with rin-website-2 (F5) |
 | delegation-governor-2 distribution | standard | opencode-main (minimax-m3) | fast, incomplete (F8) |
-| rin-website-2 price | standard | codex | 2nd concurrent codex job (F5) |
-| rin-website-3 akcii | standard | opencode-main (minimax-m3) | concurrent with delegation-governor-2 (F5) |
-| rin-website-4 gallery | standard | opencode-main-fallback (qwen3.6-plus) | |
-| delegation-governor-3 distribution fixes | hard | opencode-smart (glm-5.3) | codex at capacity in this repo |
+| rin-website-2 price | standard | codex | 2nd concurrent codex job (F5); reveal bug on tall section fixed by supervisor in shared JS |
+| rin-website-3 akcii | standard | opencode-main (minimax-m3) | concurrent with delegation-governor-2 (F5); content verbatim, but stubbed 2 pages (F11) |
+| rin-website-4 gallery | standard | opencode-main-fallback (qwen3.6-plus) | 185 s, all 28 images, clean |
+| delegation-governor-3 distribution fixes | hard | opencode-smart (glm-5.3) | 843 s, good; one test fixed in review |
 
 Idle all session: opencode-fast, opencode-fast-fallback (no tiny/simple work was created),
 opencode-bulk, opencode-reviewer (not routable by class). station down (LM Studio off).
+
+## Outcome
+
+All 7 ledger tasks INTEGRATED. Quality by lane: codex 3/3 clean; opencode-main-fallback 1/1 clean;
+opencode-smart 1/1 good with one test fix; opencode-main 2/2 needed supervisor intervention
+(missing tests F8, scope stubs F11). Supervisor reviews caught 4 defects no worker gate caught
+(F8, F11, F15, price-page reveal). `dg distribution` 1ST/FB columns are empty for this session:
+every dispatch predates `routing.jsonl`.
