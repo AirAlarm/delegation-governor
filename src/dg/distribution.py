@@ -44,7 +44,11 @@ def _matches_repo(value: str, repo: str) -> bool:
 # ---------------------------------------------------------------- counts
 
 def _classify(status: str) -> str:
-    """Bucket a task's status for the per-lane totals."""
+    """Bucket an attempt's status for the per-lane totals.
+
+    Attempts, not tasks: a retried task has one FAILED and one SUCCEEDED
+    attempt on different lanes, and each must land in its own bucket.
+    """
     if status in ("RUNNING", "QUEUED"):
         return "running"
     if status in ("SUCCEEDED", "INTEGRATED"):
@@ -84,16 +88,20 @@ def report(con: sqlite3.Connection, cfg: dict, routes: list[dict],
 
     # -- attempt data -----------------------------------------------------
     # One SQL pass: every attempt joined with its task, so the per-lane and
-    # per-class buckets only need dict lookups after this.
+    # per-class buckets only need dict lookups after this. Buckets classify
+    # the ATTEMPT status (a.status), not the task's: a retried task has a
+    # FAILED and a SUCCEEDED attempt on different lanes.
     joined: list[dict] = []
     rows = con.execute(
             "SELECT a.id, a.task_id, a.lane, a.worker,"
-            " a.started_at, a.ended_at,"
-            " t.status AS task_status, t.task_class, t.repo AS task_repo"
+            " a.status AS attempt_status, a.started_at, a.ended_at,"
+            " t.task_class, t.repo AS task_repo"
             " FROM attempts a JOIN tasks t ON t.id = a.task_id"
     ).fetchall()
     for r in rows:
         d = dict(r)
+        if since_ts is not None and float(d.get("started_at") or 0.0) < since_ts:
+            continue
         if not _matches_repo(d.get("task_repo", "") or "", repo):
             continue
         joined.append(d)
@@ -108,7 +116,7 @@ def report(con: sqlite3.Connection, cfg: dict, routes: list[dict],
         buckets = {"running": 0, "succeeded": 0, "failed": 0, "superseded": 0}
         classes: dict[str, int] = {}
         for a in lane_attempts:
-            kind = _classify(a["task_status"])
+            kind = _classify(a["attempt_status"])
             if kind in buckets:
                 buckets[kind] += 1
             cls = a.get("task_class") or "standard"
@@ -188,9 +196,9 @@ def report(con: sqlite3.Connection, cfg: dict, routes: list[dict],
             if (r.get("task_class") or "standard") != cls:
                 continue
             in_flight = r.get("in_flight") or {}
-            outside = [n for n, info in lane_by_name.items()
-                       if n not in pref and info["available"]
-                       and in_flight.get(n, 0) == 0]
+            outside = [lane for lane, info in lane_by_name.items()
+                       if lane not in pref and info["available"]
+                       and in_flight.get(lane, 0) == 0]
             if outside:
                 outside_names = ",".join(sorted(outside))
                 flags.append(
