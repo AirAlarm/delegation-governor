@@ -1,0 +1,11 @@
+[PASS] at least 4 pages — akcii.html, gallery.html, index.html, uslugi.html
+[PASS] Акции page present
+[PASS] all local links/images resolve
+[PASS] one <h1> per page — akcii.html=1, gallery.html=1, index.html=1, uslugi.html=1
+[PASS] viewport meta on every page
+[PASS] every <img> has alt
+[FAIL] price list: services with name and price present — 33/37
+[PASS] all 5 promos named
+[PASS] contacts present
+[FAIL] site weight under 25 MB (no raw PSD/video dumps) — 27.6 MB
+{"passed": 8, "total": 10}

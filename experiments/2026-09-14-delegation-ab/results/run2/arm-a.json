@@ -1,0 +1,69 @@
+{
+  "session_id": "65c7c577-e5bc-4df2-a58f-151e93345085",
+  "tokens": {
+    "input": 280,
+    "cache_write": 196362,
+    "cache_read": 20459786,
+    "output": 70320,
+    "processed": 20726748,
+    "generated": 266962,
+    "api_calls": 139
+  },
+  "wall_minutes": 52.5,
+  "tool_calls": {
+    "Bash": 101,
+    "Read": 56,
+    "ToolSearch": 4,
+    "Write": 4,
+    "WebFetch": 2,
+    "mcp__plugin_delegation-governor_dg-worker__run_dev_task": 2,
+    "Skill": 1,
+    "mcp__plugin_delegation-governor_dg-worker__get_task_progress": 1,
+    "mcp__plugin_delegation-governor_dg-worker__cancel_task": 1,
+    "mcp__plugin_delegation-governor_dg-worker__cleanup_task": 1,
+    "SendFeedback": 1,
+    "Edit": 1
+  },
+  "start": "2026-09-14T10:23:17.839Z",
+  "end": "2026-09-14T11:15:49.146Z",
+  "cost_usd": 14.9244,
+  "claude_windows": {
+    "five_hour": {
+      "start": 1,
+      "end": 8,
+      "delta": 7,
+      "window_reset_during_arm": false
+    },
+    "seven_day": {
+      "start": 13,
+      "end": 13,
+      "delta": 0,
+      "window_reset_during_arm": false
+    },
+    "snapshots": 262,
+    "raw_first": {
+      "five_hour": {
+        "used_percentage": 1,
+        "resets_at": 1789399200
+      },
+      "seven_day": {
+        "used_percentage": 13,
+        "resets_at": 1789707600
+      }
+    }
+  },
+  "bracketed_windows": {
+    "five_hour": {
+      "start": 1,
+      "end": 8,
+      "delta": 7,
+      "window_reset_during_arm": false
+    },
+    "seven_day": {
+      "start": 13,
+      "end": 13,
+      "delta": 0,
+      "window_reset_during_arm": false
+    }
+  }
+}
