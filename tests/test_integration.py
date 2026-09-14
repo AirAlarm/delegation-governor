@@ -460,3 +460,67 @@ class TestNoChangeOutcome(DGTest):
             {"status": "SUCCEEDED", "errorKind": None, "resetsAt": None},
             [{"item": {"text": "added new.py"}}], None)
         self.assertIsNone(store.get_task(self.con, a)["failureReason"])
+
+
+class TestCancelledCcDelegateJob(DGTest):
+    """Field test 2026-09-14 (rin-website-16): MCP cancel_task + cleanup_task left the
+    attempt RUNNING, so its fallback failed dispatch with "path conflict" forever."""
+
+    def _running_job(self, repo, paths=("gallery.html",)):
+        a = self.task("gallery", repo=repo, paths=list(paths))
+        att = store.reserve_attempt(self.con, a, "s", "cc-delegate", "opencode-main", self.cfg)["attemptId"]
+        jobs = Path(repo) / ".cc-delegate" / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "t_loop.json").write_text(json.dumps(
+            {"taskId": "t_loop", "status": "running", "worktree": "/wt/t_loop", "branch": "delegate/t_loop"}))
+        self.assertTrue(cc_delegate.attach(self.con, store.get_task(self.con, a), "t_loop", "wo")["ok"])
+        return a, jobs / "t_loop.json"
+
+    def _retry_reserves(self, original):
+        from dg import cli
+        quota_codex.read_rate_limits = lambda *a, **k: {
+            "ok": False, "errorKind": quota_codex.NETWORK_ERROR, "detail": "stubbed"}
+        self.assertEqual(cli.cmd_fallback(type("A", (), {"id": original})()), 0)
+        new = [t["id"] for t in store.all_tasks(self.con) if t["retryOf"] == original][0]
+        res = store.reserve_attempt(self.con, new, "s", "codex", "codex", self.cfg)
+        self.assertTrue(res["ok"], res.get("reason"))
+
+    def test_cleaned_up_job_file_fails_the_attempt(self):
+        repo = make_repo()
+        a, job = self._running_job(repo)
+        row = [r for r in store.running_attempts(self.con) if r["task_id"] == a][0]
+        self.assertIsNone(cc_delegate.sync(self.con, row))  # records the worktree
+        job.unlink()  # cancel_task, then cleanup_task removes the persisted job
+        row = [r for r in store.running_attempts(self.con) if r["task_id"] == a][0]
+        self.assertEqual(cc_delegate.sync(self.con, row), "FAILED")
+        self.assertIsNone(store.live_attempt(self.con, a))
+        self._retry_reserves(a)
+
+    def test_dg_cancel_records_an_mcp_cancelled_job(self):
+        from dg import cli
+        repo = make_repo()
+        a, job = self._running_job(repo)
+        args = type("A", (), {"id": a})()
+        cli.cmd_cancel(args)  # still running: only asks for the MCP cancel first
+        self.assertEqual(store.get_task(self.con, a)["status"], "RUNNING")
+        job.unlink()
+        self.assertEqual(cli.cmd_cancel(args), 0)
+        self.assertEqual(store.get_task(self.con, a)["status"], "CANCELLED")
+        self._retry_reserves(a)
+
+    def test_terminal_status_closes_the_live_attempt(self):
+        repo = make_repo()
+        a, _ = self._running_job(repo)
+        store.set_status(self.con, a, "FAILED", failure_reason="looped")
+        self.assertIsNone(store.live_attempt(self.con, a))
+        self.assertEqual(store.attempts_for(self.con, a)[-1]["status"], "FAILED")
+        self._retry_reserves(a)
+
+    def test_unattached_handoff_is_explained(self):
+        repo = make_repo()
+        a = self.task("akcii", repo=repo, paths=["akcii.html"])
+        store.reserve_attempt(self.con, a, "s", "cc-delegate", "opencode-main", self.cfg)
+        row = {r["id"]: r for r in scheduler.evaluate(self.con, self.cfg)["tasks"]}[a]
+        self.assertEqual(row["state"], "QUEUED")
+        self.assertIn("awaiting handoff", row["reason"])
+        self.assertIn(f"dg attach {a}", row["reason"])

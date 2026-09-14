@@ -30,6 +30,7 @@ STORED_STATUSES = {
 TERMINAL_OK = {"INTEGRATED"}
 TERMINAL_BAD = {"FAILED", "QUOTA_FAILED", "AUTH_FAILED", "CANCELLED"}
 ACTIVE = {"QUEUED", "RUNNING"}
+FALLBACK_FROM = {"QUOTA_FAILED", "AUTH_FAILED", "FAILED", "CANCELLED"}
 ATTEMPT_ACTIVE = {"RESERVED", "QUEUED", "RUNNING"}
 
 _DDL = """
@@ -299,6 +300,20 @@ def set_status(
         " WHERE id=?",
         (status, time.time(), failure_reason, result_location, tid),
     )
+    if status in TERMINAL_OK | TERMINAL_BAD | {"SUPERSEDED"}:
+        close_live_attempts(con, tid, status)
+
+
+def close_live_attempts(con: sqlite3.Connection, tid: str, task_status: str) -> None:
+    """A finished task must not keep a live attempt: it would hold its lane and
+    its paths forever (a cancelled cc-delegate job blocked its own fallback)."""
+    now = time.time()
+    con.execute(
+        "UPDATE attempts SET status=?, error_kind=COALESCE(error_kind,?), ended_at=?,"
+        " last_checked_at=? WHERE task_id=? AND status IN ('RESERVED','QUEUED','RUNNING')",
+        (task_status if task_status in TERMINAL_BAD else "CANCELLED",
+         f"task set {task_status}", now, now, tid),
+    )
 
 
 def set_depends_on(con: sqlite3.Connection, tid: str, deps: Iterable[str]) -> None:
@@ -312,8 +327,7 @@ def create_fallback(con: sqlite3.Connection, original: dict[str, Any]) -> str:
     with transaction(con):
         current = con.execute("SELECT status FROM tasks WHERE id=?",
                               (original["id"],)).fetchone()
-        if current is None or current["status"] not in (
-                "QUOTA_FAILED", "AUTH_FAILED", "FAILED"):
+        if current is None or current["status"] not in FALLBACK_FROM:
             raise ValueError(f"{original['id']} is not eligible for fallback")
         new = next_id(con, original["repo"])
         con.execute(
@@ -340,6 +354,7 @@ def create_fallback(con: sqlite3.Connection, original: dict[str, Any]) -> str:
             "updated_at=? WHERE id=?",
             (new, f"{current['status']}; superseded by {new}", now, original["id"]),
         )
+        close_live_attempts(con, original["id"], "SUPERSEDED")
     return new
 
 

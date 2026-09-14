@@ -89,6 +89,12 @@ dg fallback DG-42            <- DG-42 becomes SUPERSEDED, a fresh task appears
 The retry starts from the original clean base. Partial output from the failed
 attempt is kept for diagnosis and never reused or auto-integrated.
 
+A dg-worker job that loops or stalls: `cancel_task` it over MCP, then run
+`dg cancel <id>` (it records the cancel, even after `cleanup_task`), then
+`dg fallback <id>`. `dg tasks` shows a dispatched-but-never-launched dg-worker
+task as QUEUED with an "awaiting handoff" reason. It holds its lane until you
+call `run_dev_task` and `dg attach`, or `dg release` it.
+
 ## Recovery
 
 Codex returns by itself: once the reset time passes, the next routing decision

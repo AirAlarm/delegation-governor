@@ -389,8 +389,17 @@ def cmd_cancel(args) -> int:
             store.release_reservation(con, args.id)
             return _emit({"task": args.id, "status": "PLANNED", "released": True}, True)
         if a["worker"] != routing.CODEX:
+            # dg can't reach the MCP server, so the job is cancelled there first;
+            # this call then records it, including after cleanup_task deleted the job file.
+            job = cc_delegate.read_job(t["repo"], (a.get("handle") or "")[3:])
+            if job is None or str(job.get("status", "")).lower() not in ("running", "needs_input"):
+                store.finish_attempt(con, a["id"], "CANCELLED", "cancelled by user")
+                store.set_status(con, args.id, "CANCELLED", failure_reason="cancelled by user")
+                return _emit({"ok": True, "task": args.id, "status": "CANCELLED",
+                              "next": f"dg fallback {args.id} to retry"}, True)
             return _emit({"ok": False, "task": args.id,
-                          "action": "cancel this cc-delegate job through its MCP tool",
+                          "action": "cancel this cc-delegate job through its MCP tool "
+                                    "(cancel_task), then run dg cancel again",
                           "externalJobId": a.get("external_job_id")}, True)
         result = codex_plugin.cancel(a)
         if result.get("ok"):
@@ -449,7 +458,7 @@ def cmd_fallback(args) -> int:
     if not t:
         print(f"no such task {args.id}", file=sys.stderr)
         return 1
-    if t["status"] not in ("QUOTA_FAILED", "AUTH_FAILED", "FAILED"):
+    if t["status"] not in store.FALLBACK_FROM:
         print(f"{args.id} is {t['status']}, nothing to fall back from", file=sys.stderr)
         return 2
     new = store.create_fallback(con, t)

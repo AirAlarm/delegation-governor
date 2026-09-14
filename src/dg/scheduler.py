@@ -96,6 +96,7 @@ def evaluate(con: sqlite3.Connection, cfg: dict) -> dict[str, Any]:
     tasks = store.all_tasks(con)
     by_id = {t["id"]: t for t in tasks}
     blocks = store.blocks_map(tasks)
+    handoffs = {a["task_id"]: a for a in store.reserved_attempts(con) if a["worker"] == "cc-delegate"}
     out: list[dict[str, Any]] = []
     for t in tasks:
         row = dict(t)
@@ -104,6 +105,10 @@ def evaluate(con: sqlite3.Connection, cfg: dict) -> dict[str, Any]:
         if t["status"] != "PLANNED":
             row["state"] = t["status"]
             row["reason"] = ""
+            if (a := handoffs.get(t["id"])):
+                # A missed handoff otherwise shows as a silent QUEUED that holds a lane.
+                row["reason"] = (f"awaiting handoff: call run_dev_task, then dg attach {t['id']} "
+                                 f"<cc-task-id> --attempt {a['id']} (or dg release {t['id']})")
         else:
             ok, why = dependency_state(t, by_id)
             if not ok:

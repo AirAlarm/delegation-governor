@@ -104,7 +104,15 @@ def sync(con: sqlite3.Connection, attempt: dict[str, Any]) -> str | None:
     job = read_job(attempt["repo"], handle[3:])
     store.touch_attempt(con, attempt["id"])
     if job is None:
-        return None
+        if not attempt.get("worktree"):
+            return None  # not visible yet
+        # The file existed (we recorded its worktree) and is gone: cleanup_task ran,
+        # which it only does for finished jobs, and took the result with it.
+        store.finish_attempt(con, attempt["id"], "FAILED", "job cleaned up",
+                             "cc-delegate job file removed before dg recorded its final status")
+        store.set_status(con, attempt["task_id"], "FAILED",
+                         failure_reason="cc-delegate job cleaned up before its result was recorded")
+        return "FAILED"
     # `run_dev_task` may return before its job file is visible. Attach keeps
     # the reservation in that case; populate the integration coordinates as
     # soon as reconciliation can see them.
