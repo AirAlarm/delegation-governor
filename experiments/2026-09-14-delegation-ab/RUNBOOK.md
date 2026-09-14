@@ -137,3 +137,140 @@ python3 check_site.py ~/Projects/rin-website > results/arm-a-check.txt
   integrate friction, F19 quota blindness). The result describes the product today, not its ceiling.
 - **Unconfirmed field name:** the statusline field name for utilisation is unconfirmed. `measure.py` reads
   `utilization` or `used_percentage`; check `raw_first` in the results if a delta is `null`.
+
+---
+
+# Run 2 — order swapped (arm A first)
+
+Run 1 was INCONCLUSIVE (`results/analysis.md`), so run 2 swaps the order. It changes three things:
+
+1. **Order:** arm A runs first.
+2. **Bracket readings:** a one-prompt Haiku session runs before, between and after the arms. Its first
+   statusline gives the 5 h / 7 d state with no arm tail missing. This prevents run 1's misattributed boundary tick.
+3. **Cost metric:** statusline `total_cost_usd` per arm is reported as a secondary metric (about $2.5 per 5 h pp
+   in run 1), and `check_site.py` now also reads JS/JSON price data.
+
+The decision rule above is unchanged. It uses the **bracketed** 5 h deltas: A = R1 − R0, B = R2 − R1.
+
+Session ids:
+
+| Session | Id |
+|---|---|
+| R0 reading (before A) | `aa95fbc3-a809-4471-9c43-6f8dd4460fa4` |
+| Arm A2 | `6a016168-8d57-408d-abc9-8fe293fa8e4f` |
+| R1 reading (after A, before B) | `b3a086d2-524a-4377-8429-112a4397acf0` |
+| Arm B2 | `1ecfb531-6c9e-42e9-8eb9-452364ca0fbd` |
+| R2 reading (after B) | `ce41867d-f008-40d4-8f34-7e25869cea76` |
+
+**How to take a reading:**
+- Run the command. When "OK" appears and the statusline shows, type `/exit`.
+- Before readings R1 and R2, wait 2 minutes after the arm exits, so usage accounting catches up.
+- A reading costs one tiny Haiku turn. It is identical in every bracket, so it cancels out.
+
+## Run 2 steps
+
+From `~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab`:
+
+### 0. Preconditions
+
+```bash
+dg tasks running
+```
+
+```bash
+ls -A ~/Projects/rin-website
+```
+
+```bash
+mkdir -p results/run2
+```
+
+### 1. Reading R0
+
+```bash
+./snapshot.sh run2-R0
+```
+
+```bash
+claude --session-id aa95fbc3-a809-4471-9c43-6f8dd4460fa4 --model claude-haiku-4-5-20251001 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
+```
+
+### 2. Arm A2 (delegated)
+
+Note the OpenCode Go dashboard, then:
+
+```bash
+cd ~/Projects/rin-website && claude --session-id 6a016168-8d57-408d-abc9-8fe293fa8e4f --model claude-opus-5 --effort high --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-a.settings.json "$(cat ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/task.md ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-a.md)"
+```
+
+When it has finished and exited, note the OpenCode Go dashboard again. Then, back in the experiment folder:
+
+```bash
+cd ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab
+```
+
+```bash
+python3 check_site.py ~/Projects/rin-website > results/run2/arm-a-check.txt
+```
+
+```bash
+./reset.sh arm-a2
+```
+
+### 3. Reading R1 (wait 2 minutes after arm A2 exits)
+
+```bash
+./snapshot.sh run2-R1
+```
+
+```bash
+claude --session-id b3a086d2-524a-4377-8429-112a4397acf0 --model claude-haiku-4-5-20251001 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
+```
+
+### 4. Arm B2 (Claude only)
+
+```bash
+cd ~/Projects/rin-website && claude --session-id 1ecfb531-6c9e-42e9-8eb9-452364ca0fbd --model claude-opus-5 --effort high --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "$(cat ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/task.md ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.md)"
+```
+
+```bash
+cd ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab
+```
+
+```bash
+python3 check_site.py ~/Projects/rin-website > results/run2/arm-b-check.txt
+```
+
+```bash
+./reset.sh arm-b2
+```
+
+### 5. Reading R2 (wait 2 minutes after arm B2 exits)
+
+```bash
+./snapshot.sh run2-R2
+```
+
+```bash
+claude --session-id ce41867d-f008-40d4-8f34-7e25869cea76 --model claude-haiku-4-5-20251001 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
+```
+
+### 6. Measure
+
+```bash
+python3 measure.py 6a016168-8d57-408d-abc9-8fe293fa8e4f --before aa95fbc3-a809-4471-9c43-6f8dd4460fa4 --after b3a086d2-524a-4377-8429-112a4397acf0 > results/run2/arm-a.json
+```
+
+```bash
+python3 measure.py 1ecfb531-6c9e-42e9-8eb9-452364ca0fbd --before b3a086d2-524a-4377-8429-112a4397acf0 --after ce41867d-f008-40d4-8f34-7e25869cea76 > results/run2/arm-b.json
+```
+
+**Checks before analysis:**
+- **Readings:** each `results/run2/arm-*.json` must contain `bracketed_windows` with numeric deltas and no
+  mid-arm window reset.
+- **5 h window:** it must not reset between R0 and R2. Run 2 takes about 50 minutes, so start it at least
+  1 hour before the reset shown in the statusline.
+- **If a check fails:** re-run that arm with a new id (`uuidgen`).
+
+Analysis: a fresh session with §3 of this runbook, comparing run 1 and run 2 together. Blind-review the
+run 2 sites too.

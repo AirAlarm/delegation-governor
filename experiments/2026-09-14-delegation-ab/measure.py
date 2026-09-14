@@ -57,13 +57,13 @@ def tokens(path: Path) -> dict:
             "tool_calls": dict(tools.most_common()), "start": min(stamps), "end": max(stamps)}
 
 
-def window_deltas(session_id: str) -> dict:
+def snapshots(session_id: str) -> list[dict]:
     path = HERE / "usage.jsonl"
     rows = [json.loads(l) for l in path.open()] if path.exists() else []
-    rows = [r for r in rows if r.get("session_id") == session_id and r.get("rate_limits")]
-    if len(rows) < 2:
-        return {"note": "fewer than 2 statusline snapshots with rate_limits for this session"}
-    first, last = rows[0]["rate_limits"], rows[-1]["rate_limits"]
+    return [r for r in rows if r.get("session_id") == session_id]
+
+
+def _deltas(first: dict, last: dict) -> dict:
     out = {}
     for w in ("five_hour", "seven_day"):
         a, b = first.get(w) or {}, last.get(w) or {}
@@ -71,12 +71,44 @@ def window_deltas(session_id: str) -> dict:
         out[w] = {"start": ua, "end": ub,
                   "delta": (ub - ua) if isinstance(ua, (int, float)) and isinstance(ub, (int, float)) else None,
                   "window_reset_during_arm": a.get("resets_at") != b.get("resets_at")}
-    out["snapshots"] = len(rows)
-    out["raw_first"] = first
     return out
 
 
+def window_deltas(session_id: str) -> dict:
+    rows = [r for r in snapshots(session_id) if r.get("rate_limits")]
+    if len(rows) < 2:
+        return {"note": "fewer than 2 statusline snapshots with rate_limits for this session"}
+    out = _deltas(rows[0]["rate_limits"], rows[-1]["rate_limits"])
+    out["snapshots"] = len(rows)
+    out["raw_first"] = rows[0]["rate_limits"]
+    return out
+
+
+def cost_usd(session_id: str) -> float | None:
+    """Statusline total_cost_usd is cumulative per session, so the last value is the arm's cost."""
+    costs = [(r.get("cost") or {}).get("total_cost_usd") for r in snapshots(session_id)]
+    costs = [c for c in costs if isinstance(c, (int, float))]
+    return round(costs[-1], 4) if costs else None
+
+
+def reading(session_id: str) -> dict | None:
+    """A bracket reading session's first rate_limits: the window state before/after an arm."""
+    rows = [r for r in snapshots(session_id) if r.get("rate_limits")]
+    return rows[0]["rate_limits"] if rows else None
+
+
 if __name__ == "__main__":
-    for sid in sys.argv[1:]:
-        print(json.dumps({"session_id": sid, **tokens(transcript(sid)),
-                          "claude_windows": window_deltas(sid)}, indent=2, ensure_ascii=False))
+    args = sys.argv[1:]
+    before = after = None
+    if "--before" in args:
+        i = args.index("--before"); before = args[i + 1]; del args[i:i + 2]
+    if "--after" in args:
+        i = args.index("--after"); after = args[i + 1]; del args[i:i + 2]
+    for sid in args:
+        out = {"session_id": sid, **tokens(transcript(sid)),
+               "cost_usd": cost_usd(sid), "claude_windows": window_deltas(sid)}
+        if before and after:
+            rb, ra = reading(before), reading(after)
+            out["bracketed_windows"] = (_deltas(rb, ra) if rb and ra else
+                                        {"note": "a bracket reading session has no rate_limits snapshot"})
+        print(json.dumps(out, indent=2, ensure_ascii=False))

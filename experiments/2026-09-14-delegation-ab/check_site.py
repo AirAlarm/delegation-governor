@@ -39,7 +39,12 @@ check("every <img> has alt", all(re.search(r"<img(?![^>]*\balt=)[^>]*>", h) is N
 
 rows = list(openpyxl.load_workbook(assets / "download_price_list.xlsx", data_only=True).active.iter_rows(values_only=True))[1:]
 names = [(r[2], int(r[7])) for r in rows if r[2]]
-price_text = text_all.replace(" ", " ").replace(" ", " ")
+# Prices may be rendered by JS from a data file (run 1, arm B), so read .js/.json too.
+data_files = [p for p in site.rglob("*") if p.suffix in (".js", ".json") and p.is_file()
+              and not {"assets", ".git", ".cc-delegate", "node_modules"} & set(p.parts)]
+data_text = " ".join(re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)),
+                            p.read_text("utf-8", errors="replace")) for p in data_files)
+price_text = (text_all + " " + data_text).replace("\u00a0", " ").replace("\u202f", " ")
 priced = [n for n, pr in names if n in price_text and re.search(rf"{pr // 1000}[  ]?{pr % 1000:03d}|{pr}", price_text)]
 check("price list: services with name and price present", len(priced) >= len(names) - 2, f"{len(priced)}/{len(names)}")
 
