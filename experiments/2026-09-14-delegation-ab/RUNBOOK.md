@@ -145,7 +145,7 @@ python3 check_site.py ~/Projects/rin-website > results/arm-a-check.txt
 Run 1 was INCONCLUSIVE (`results/analysis.md`), so run 2 swaps the order. It changes three things:
 
 1. **Order:** arm A runs first.
-2. **Bracket readings:** a one-prompt Haiku session runs before, between and after the arms. Its first
+2. **Bracket readings:** a one-prompt Opus session runs before, between and after the arms. Its first
    statusline gives the 5 h / 7 d state with no arm tail missing. This prevents run 1's misattributed boundary tick.
 3. **Cost metric:** statusline `total_cost_usd` per arm is reported as a secondary metric (about $2.5 per 5 h pp
    in run 1), and `check_site.py` now also reads JS/JSON price data.
@@ -165,7 +165,7 @@ Session ids:
 **How to take a reading:**
 - Run the command. When "OK" appears and the statusline shows, type `/exit`.
 - Before readings R1 and R2, wait 2 minutes after the arm exits, so usage accounting catches up.
-- A reading costs one tiny Haiku turn. It is identical in every bracket, so it cancels out.
+- A reading costs one short Opus turn (about 0.1 pp of the 5 h window). It is identical in every bracket, so it cancels out.
 
 ## Run 2 steps
 
@@ -192,7 +192,7 @@ mkdir -p results/run2
 ```
 
 ```bash
-claude --session-id aa95fbc3-a809-4471-9c43-6f8dd4460fa4 --model claude-haiku-4-5-20251001 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
+claude --session-id aa95fbc3-a809-4471-9c43-6f8dd4460fa4 --model claude-opus-5 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
 ```
 
 ### 2. Arm A2 (delegated)
@@ -224,7 +224,7 @@ python3 check_site.py ~/Projects/rin-website > results/run2/arm-a-check.txt
 ```
 
 ```bash
-claude --session-id b3a086d2-524a-4377-8429-112a4397acf0 --model claude-haiku-4-5-20251001 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
+claude --session-id b3a086d2-524a-4377-8429-112a4397acf0 --model claude-opus-5 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
 ```
 
 ### 4. Arm B2 (Claude only)
@@ -252,7 +252,7 @@ python3 check_site.py ~/Projects/rin-website > results/run2/arm-b-check.txt
 ```
 
 ```bash
-claude --session-id ce41867d-f008-40d4-8f34-7e25869cea76 --model claude-haiku-4-5-20251001 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
+claude --session-id ce41867d-f008-40d4-8f34-7e25869cea76 --model claude-opus-5 --settings ~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab/arm-b.settings.json "Reply with OK."
 ```
 
 ### 6. Measure
