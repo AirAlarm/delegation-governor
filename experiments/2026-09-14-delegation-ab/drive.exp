@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# Run one interactive claude session unattended (the statusline only renders in a TTY).
+# Approves permission prompts with Enter (the first option, "Yes") like the human did in run 1,
+# and types /exit once <flag> appears. Uses no Claude tokens itself.
+# Usage: drive.exp <cwd> <flag> claude <args...>
+set cwd [lindex $argv 0]
+set flag [lindex $argv 1]
+cd $cwd
+log_user 0
+if {[info exists env(DRIVE_LOG)]} { log_file -noappend $env(DRIVE_LOG) }
+match_max 20000
+set stty_init "rows 50 cols 200"
+spawn -noecho {*}[lrange $argv 2 end]
+set approvals 0
+while 1 {
+  expect -timeout 5 \
+    -re {Do you want to (proceed|make this edit|create|allow)} {
+      sleep 1; send "\r"; incr approvals
+      puts "drive.exp: approved permission prompt #$approvals"
+    } \
+    -re {.+} {} timeout {} eof { exit 0 }
+  if {[file exists $flag]} break
+}
+sleep 2
+send "/exit"
+sleep 1
+send "\r"
+expect -timeout 60 eof { exit 0 } -re {.+} { exp_continue -continue_timer } timeout {}
+send "\x03"; sleep 1; send "\x03"
+expect -timeout 20 eof {} timeout { close }

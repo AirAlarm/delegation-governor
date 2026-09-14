@@ -169,6 +169,15 @@ Session ids:
 
 ## Run 2 steps
 
+**Run 2 was driven unattended** by `python3 autorun.py`, which runs steps 0–6 below. It drives each
+interactive session in a pty through `drive.exp`, approves permission prompts with Enter as in run 1, and
+types `/exit` when done. See its docstring for how it decides an arm is done. It deviates from the manual
+steps in two ways:
+- readings run from `~/Projects/rin-website`, because this folder's trust dialog can't be accepted unattended;
+- the OpenCode Go dashboard is read once after the run, since its 5 h window was empty before arm A.
+
+Its log and the actual session ids are in `results/run2/`.
+
 From `~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab`:
 
 ### 0. Preconditions
