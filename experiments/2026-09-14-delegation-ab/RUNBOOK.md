@@ -283,3 +283,33 @@ python3 measure.py 1ecfb531-6c9e-42e9-8eb9-452364ca0fbd --before b3a086d2-524a-4
 
 Analysis: a fresh session with §3 of this runbook, comparing run 1 and run 2 together. Blind-review the
 run 2 sites too.
+
+## Run 2 outcome (2026-09-14) — next step: analysis
+
+Run 2 is **complete and measured**. Only the analysis remains.
+
+- **Arm B2 (valid):** 11:14–11:35 MSK, session `1ecfb531…`, bracket R1 → R2.
+  - Results: 5 h 8 → 12 (4 pp), $7.51, 7/10.
+  - Site: `~/Projects/rin-website-archive/arm-b2`.
+- **Arm A2 (invalid):** session `6a016168…`. The driver stopped it before it finished; it had only committed a scaffold.
+  - Kept as `results/run2/arm-a-aborted*` and `~/Projects/rin-website-archive/arm-a2-aborted`.
+  - Its dg tasks rin-website-9…12 were set to CANCELLED.
+- **Arm A2r (valid):** re-run alone after the 5 h reset, 13:23–14:20 MSK, session `65c7c577…`, bracket R3 → R4.
+  - Results: 5 h 1 → 8 (7 pp), $14.92, 8/10, Codex 5 h +39 pp.
+  - Site: `~/Projects/rin-website-archive/arm-a2r`.
+  - A ran after B, not first, in a new 5 h window.
+  - OpenCode Go usage was not recorded.
+- **Files:**
+  - all session ids: `results/run2/session-ids.json`;
+  - measurements: `results/run2/arm-{a,b}.json` and `arm-{a,b}-check.txt`;
+  - driver log: `results/run2/autorun.log`.
+- **Raw rule reading:** **REJECTED**, because A's 5 h delta (7) ≥ B's (4). `generated` 267k vs 262k.
+- **Arm A2r friction:**
+  - a looping worker job had to be cancelled;
+  - the ledger attempt then stayed RUNNING and blocked the fallback with a path conflict;
+  - A2r filed this itself via `SendFeedback` — a real dg bug to fix.
+
+**Next:** in a fresh session, run §3 on run 1 + run 2 together:
+- blind-review `arm-a2r` vs `arm-b2` as `site-1`/`site-2`;
+- write `results/run2/analysis.md`;
+- give the combined verdict.
