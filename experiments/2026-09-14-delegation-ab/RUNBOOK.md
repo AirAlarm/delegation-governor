@@ -309,7 +309,9 @@ Run 2 is **complete and measured**. Only the analysis remains.
   - the ledger attempt then stayed RUNNING and blocked the fallback with a path conflict;
   - A2r filed this itself via `SendFeedback` — a real dg bug to fix.
 
-**Next:** in a fresh session, run §3 on run 1 + run 2 together:
-- blind-review `arm-a2r` vs `arm-b2` as `site-1`/`site-2`;
-- write `results/run2/analysis.md`;
-- give the combined verdict.
+## Analysis done (2026-09-14): combined verdict REJECTED
+
+See `results/run2/analysis.md`, with the blind review in `results/run2/blind-review.md`.
+- **A2r's 5 h delta is contaminated.** A concurrent desktop Opus session (CryptAndHearth `/design-review`) ran during it; A2r's own share is ≈ 4 pp, about the same as B2.
+- **Tokens and cost:** A ≥ B in both runs (cost 1.08× and 1.99×).
+- **Blind review:** B2 8/10 vs A2r 6/10 (A2r had 2 blocking defects). Across both runs, quality is a wash.
