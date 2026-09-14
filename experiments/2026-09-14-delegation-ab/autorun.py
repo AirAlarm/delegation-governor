@@ -1,6 +1,8 @@
-"""Run the whole run 2 procedure (RUNBOOK "Run 2 steps" 0-6) unattended. Uses no Claude tokens itself.
+"""Run an A/B round unattended. Uses no Claude tokens itself.
 
-Usage: python3 autorun.py            (log: results/run2/autorun.log)
+Usage: python3 autorun.py            run 2 (RUNBOOK "Run 2 steps" 0-6; log: results/run2/autorun.log)
+       python3 autorun.py rerun-a    run 2 arm A re-run
+       python3 autorun.py round3     round 3 (RUNBOOK "Round 3"; log: results/run3/autorun.log)
 
 Differences from the manual procedure, all identical for both arms:
 - sessions run under `expect` (drive.exp) in a pty, with a clean login-shell env like a user terminal;
@@ -10,6 +12,7 @@ Differences from the manual procedure, all identical for both arms:
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -28,8 +31,10 @@ IDS = {"R0": "aa95fbc3-a809-4471-9c43-6f8dd4460fa4", "A2": "6a016168-8d57-408d-a
        "R1": "b3a086d2-524a-4377-8429-112a4397acf0", "B2": "1ecfb531-6c9e-42e9-8eb9-452364ca0fbd",
        "R2": "ce41867d-f008-40d4-8f34-7e25869cea76"}
 MODEL = ["--model", "claude-opus-5"]
-PROMPT = lambda arm: (HERE / "task.md").read_text() + (HERE / f"arm-{arm}.md").read_text()
+TASK, CHECK, RUN = "task.md", "check_site.py", "run2"
+PROMPT = lambda arm: (HERE / TASK).read_text() + (HERE / f"arm-{arm}.md").read_text()
 ARM_CAP = 110 * 60
+PROJECTS = Path.home() / ".claude" / "projects"
 
 
 def log(msg: str) -> None:
@@ -145,7 +150,7 @@ def arm_done(sid: str, t0: float) -> bool:
 
 
 def reading(label: str, sid: str) -> dict:
-    log(sh("./snapshot.sh", f"run2-{label}").stdout.splitlines()[0][:200])
+    log(sh("./snapshot.sh", f"{RUN}-{label}").stdout.splitlines()[0][:200])
     drive(sid, [*MODEL, "--settings", str(HERE / "arm-b.settings.json"), "Reply with OK."], reading_done)
     rl = next((r["rate_limits"] for r in usage_rows(sid) if r.get("rate_limits")), None)
     log(f"reading {label} ({sid}): {json.dumps(rl)}")
@@ -159,7 +164,7 @@ def arm(name: str, letter: str, sid: str) -> None:
     drive(sid, [*MODEL, "--effort", "high", "--settings", str(HERE / f"arm-{letter}.settings.json"),
                 PROMPT(letter)], arm_done)
     log(sh("./snapshot.sh", f"arm-{name}-end").stdout.splitlines()[0][:200])
-    check = sh("python3", "check_site.py", str(SITE)).stdout
+    check = sh("python3", CHECK, str(SITE)).stdout
     (OUT / f"arm-{letter}-check.txt").write_text(check)
     log(f"check arm {letter}: {check.strip().splitlines()[-1] if check.strip() else 'no output'}")
     log(sh("./reset.sh", name).stdout.strip().replace("\n", " | "))
@@ -222,5 +227,97 @@ def rerun_a() -> None:
     log("arm A rerun done")
 
 
+def other_claude_activity(since: float, own: set[str]) -> dict[str, int]:
+    """Assistant turns logged since `since` by any transcript not in `own` (session ids).
+
+    Run 2's arm A2r shared its 5 h window with a desktop session nobody noticed, so
+    every arm is checked against every transcript on the machine.
+    """
+    hits: dict[str, int] = {}
+    for path in PROJECTS.rglob("*.jsonl"):
+        if path.stat().st_mtime < since or any(s in str(path) for s in own):
+            continue
+        n = 0
+        for line in path.open(errors="replace"):
+            if '"type":"assistant"' not in line.replace(" ", ""):
+                continue
+            try:
+                ts = json.loads(line).get("timestamp", "")
+                if ts and dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() >= since:
+                    n += 1
+            except ValueError:
+                continue
+        if n:
+            hits[str(path.relative_to(PROJECTS))] = n
+    return hits
+
+
+def wait_quiet(own: set[str], quiet: int = 600) -> None:
+    """Don't start an arm while another Claude session is active: wait for `quiet` s of silence."""
+    waited = 0
+    while other_claude_activity(time.time() - quiet, own):
+        if waited % 600 == 0:
+            log(f"other Claude sessions active in the last {quiet // 60} min: "
+                f"{other_claude_activity(time.time() - quiet, own)}; waiting")
+        time.sleep(60)
+        waited += 60
+
+
+def fresh_window(label: str, ids: dict, need: int, max_used: float = 40) -> None:
+    """Take reading `label` once Claude is quiet; if the 5 h window can't hold a whole arm,
+    wait for its reset and take it again."""
+    while True:
+        wait_quiet(set(ids.values()))
+        ids[label] = str(uuid.uuid4())
+        rl = reading(label, ids[label])
+        left, used = rl["five_hour"]["resets_at"] - time.time(), rl["five_hour"]["used_percentage"]
+        if left >= need and used <= max_used:
+            return
+        log(f"5h window: {left / 60:.0f} min left, {used}% used; waiting for the reset")
+        time.sleep(max(left, 0) + 180)
+
+
+def round3() -> None:
+    """Round 3: bigger task (task-r3.md), dg 0.7.4, arm A then arm B, each bracketed in its own 5 h window."""
+    global OUT, FLAGS, TASK, CHECK, RUN, ARM_CAP
+    TASK, CHECK, RUN, ARM_CAP = "task-r3.md", "check_r3.py", "run3", 180 * 60
+    OUT = HERE / "results" / "run3"
+    FLAGS = OUT / ".flags"
+    OUT.mkdir(parents=True, exist_ok=True)
+    FLAGS.mkdir(exist_ok=True)
+    plugins = json.loads((Path.home() / ".claude" / "plugins" / "installed_plugins.json").read_text())
+    installed = [i.get("version") for i in plugins["plugins"].get("delegation-governor@delegation-governor-marketplace", [])]
+    assert installed == ["0.7.4"], f"delegation-governor plugin is {installed}, round 3 needs 0.7.4"
+    dg_py = Path(sh("sh", "-c", "head -1 \"$(command -v dg)\"").stdout[2:].strip())
+    dg_src = subprocess.run([str(dg_py), "-c", "import dg; print(dg.__file__)"], capture_output=True, text=True).stdout
+    assert "/0.7.4/" in dg_src, f"dg CLI runs {dg_src.strip()}, round 3 needs the 0.7.4 cache"
+    assert "no tasks" in sh("dg", "tasks", "running").stdout, "dg tasks are running"
+    assert {p.name for p in SITE.iterdir()} <= {"assets", ".DS_Store"}, "rin-website is not clean"
+    for a in ("arm-a3", "arm-b3"):
+        assert not (SITE.parent / "rin-website-archive" / a).exists(), f"archive {a} exists"
+
+    ids: dict[str, str] = {}
+    for name, letter in (("arm-a3", "a"), ("arm-b3", "b")):
+        before, after, sid = f"{letter.upper()}3-before", f"{letter.upper()}3-after", str(uuid.uuid4())
+        fresh_window(before, ids, need=ARM_CAP + 10 * 60)
+        ids[name] = sid
+        (OUT / "session-ids.json").write_text(json.dumps(ids, indent=2) + "\n")
+        t0 = time.time()
+        arm(name, letter, sid)
+        contamination = other_claude_activity(t0, set(ids.values()))
+        if contamination:
+            log(f"WARNING: other Claude sessions were active during {name}: {contamination}")
+        time.sleep(120)
+        ids[after] = str(uuid.uuid4())
+        reading(after, ids[after])
+        (OUT / "session-ids.json").write_text(json.dumps(ids, indent=2) + "\n")
+        r = sh("python3", "measure.py", sid, "--before", ids[before], "--after", ids[after])
+        out = json.loads(r.stdout) if r.stdout else {"error": r.stderr}
+        out["other_claude_activity"] = contamination
+        (OUT / f"arm-{letter}.json").write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
+        log(f"measure {name}: 5h {out.get('bracketed_windows', {}).get('five_hour')} cost {out.get('cost_usd')}")
+    log("round 3 done")
+
+
 if __name__ == "__main__":
-    rerun_a() if sys.argv[1:] == ["rerun-a"] else main()
+    {"rerun-a": rerun_a, "round3": round3}.get(sys.argv[1] if sys.argv[1:] else "", main)()

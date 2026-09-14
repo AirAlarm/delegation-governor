@@ -315,3 +315,85 @@ See `results/run2/analysis.md`, with the blind review in `results/run2/blind-rev
 - **A2r's 5 h delta is contaminated.** A concurrent desktop Opus session (CryptAndHearth `/design-review`) ran during it; A2r's own share is ≈ 4 pp, about the same as B2.
 - **Tokens and cost:** A ≥ B in both runs (cost 1.08× and 1.99×).
 - **Blind review:** B2 8/10 vs A2r 6/10 (A2r had 2 blocking defects). Across both runs, quality is a wash.
+
+---
+
+# Round 3 — bigger task, dg 0.7.4
+
+Runs 1–2 found no saving on the small salon site. Supervision cost about as much as building, and dg friction took about 27 % of A2r. Round 3 changes three things and keeps the decision rule from the top of this runbook.
+
+1. **Bigger task:** `task-r3.md`, using the same assets as the earlier runs.
+   - Scope: the full RU site plus 34 service pages, a complete EN mirror, a booking form, SEO/JSON-LD/sitemap, performance and a11y budgets, and the builder's own `tools/check.py`.
+   - Brief rules: the xlsx is the source of truth (story-image conflicts become open questions), and nothing may be invented.
+   - Why: Claude-only B2 took 18 min; round 3 targets roughly 60–90 min. That is the case where delegation could pay back its overhead.
+2. **Fixed product:** delegation-governor **0.7.4** (commits `fb66263`, `158d386`).
+   - A cancelled or cleaned-up cc-delegate attempt now closes instead of staying RUNNING.
+   - `dg set` to a terminal status closes live attempts.
+   - `dg cancel` records an MCP-cancelled job.
+   - CANCELLED tasks can `dg fallback`.
+   - `dg tasks` explains unattached handoffs ("awaiting handoff").
+3. **Cleaner measurement, driven by `python3 autorun.py round3`:**
+   - Arm A runs first, then arm B. Each gets its own bracket (`X3-before` → arm → 2 min → `X3-after`) in a 5 h window with ≥ 190 min left and ≤ 40 % used. Otherwise the driver waits for the reset.
+   - Before each bracket reading, the driver waits until no other Claude transcript on the machine has logged a turn for 10 min.
+   - After each arm, every transcript is scanned for other sessions' turns during the arm. The result goes into `results/run3/arm-*.json` → `other_claude_activity` and is logged as a WARNING.
+   - Arm cap: 180 min. Quality check: `check_r3.py`, 26 checks. It was verified 26/26 on a spec-conforming fixture and catches a wrong duration.
+
+## Round 3 steps
+
+From `~/Projects/delegation-governor/experiments/2026-09-14-delegation-ab`.
+
+### 0. Install 0.7.4 and check preconditions
+
+- **Why:** the plugin installs from GitHub, so 0.7.4 must be pushed first.
+
+```bash
+git -C ~/Projects/delegation-governor push origin master
+```
+
+```bash
+claude plugin marketplace update delegation-governor-marketplace && claude plugin update delegation-governor
+```
+
+```bash
+uv tool install --editable ~/.claude/plugins/cache/delegation-governor-marketplace/delegation-governor/0.7.4 --quiet
+```
+
+```bash
+dg tasks running
+```
+
+```bash
+ls -A ~/Projects/rin-website
+```
+
+- **Expected:** `dg tasks running` prints `no tasks`, and `rin-website` holds only `assets` (and `.DS_Store`).
+- **The driver asserts all of this:** plugin 0.7.4 installed, `dg` CLI running from the 0.7.4 cache, no dg tasks running, clean `rin-website`, no `arm-a3`/`arm-b3` archives.
+
+### 1. Run unattended
+
+Start it in a plain Terminal, not from a Claude session:
+
+```bash
+caffeinate -i python3 autorun.py round3
+```
+
+- **Duration:** expect 3–10 h, depending on when the 5 h windows reset.
+- **Stay idle:** don't use Claude anywhere (desktop app, other terminals, phone) while an arm runs. The driver waits for quiet before each bracket reading, but it can't stop you mid-arm; it only flags it.
+- **Outputs:**
+  - log: `results/run3/autorun.log`
+  - session ids: `results/run3/session-ids.json`
+  - measurements: `results/run3/arm-{a,b}.json`
+  - quality checks: `results/run3/arm-{a,b}-check.txt`
+  - sites: `~/Projects/rin-website-archive/arm-{a3,b3}`
+
+### 2. Checks before analysis
+
+- **Brackets:** `bracketed_windows.five_hour.window_reset_during_arm` is false in both arm files, with numeric deltas.
+- **Contamination:** `other_claude_activity` is `{}` in both arm files. If not, re-run that arm.
+- **Worker quota:** Codex deltas are in `snapshots.jsonl` (labels `arm-arm-{a3,b3}-{start,end}`). Read the OpenCode Go dashboard after the run.
+
+### 3. Analysis
+
+- **Where:** a fresh session, with §3 of this runbook applied to `results/run3/`.
+- **Blind review:** copy `arm-a3` / `arm-b3` to `site-1` / `site-2` with a random mapping. Strip `.git`, `.cc-delegate`, `.gitignore`, and any dev-only files that would reveal the arm. Keep `tools/check.py`, which is part of the deliverable.
+- **Scale the reviewer's content check:** have it verify all 37 xlsx rows on both the RU and EN service pages.
