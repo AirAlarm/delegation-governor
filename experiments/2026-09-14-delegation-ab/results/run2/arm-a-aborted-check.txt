@@ -1,0 +1,11 @@
+[FAIL] at least 4 pages
+[FAIL] Акции page present
+[PASS] all local links/images resolve
+[PASS] one <h1> per page
+[PASS] viewport meta on every page
+[PASS] every <img> has alt
+[FAIL] price list: services with name and price present — 0/37
+[FAIL] all 5 promos named — Доброе утро, Твой день, Поделись заботой, После заката, Спасибо, мама
+[FAIL] contacts present — phone, address, telegram, booking
+[PASS] site weight under 25 MB (no raw PSD/video dumps) — 20.8 MB
+{"passed": 5, "total": 10}

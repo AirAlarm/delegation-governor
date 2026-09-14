@@ -6,12 +6,13 @@ Differences from the manual procedure, all identical for both arms:
 - sessions run under `expect` (drive.exp) in a pty, with a clean login-shell env like a user terminal;
 - bracket readings run from ~/Projects/rin-website (already trusted) instead of this folder;
 - an arm is "finished" when its transcript ends on an end_turn, no dg task runs, a commit exists in
-  rin-website and the transcript has been quiet for 3 min (or 20 min without a commit, or a 75 min cap).
+  rin-website and the transcript has been quiet for 3 min (or 20 min without a commit, or a 110 min cap).
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -28,7 +29,7 @@ IDS = {"R0": "aa95fbc3-a809-4471-9c43-6f8dd4460fa4", "A2": "6a016168-8d57-408d-a
        "R2": "ce41867d-f008-40d4-8f34-7e25869cea76"}
 MODEL = ["--model", "claude-opus-5"]
 PROMPT = lambda arm: (HERE / "task.md").read_text() + (HERE / f"arm-{arm}.md").read_text()
-ARM_CAP = 75 * 60
+ARM_CAP = 110 * 60
 
 
 def log(msg: str) -> None:
@@ -102,15 +103,34 @@ def reading_done(sid: str, t0: float) -> bool:
     return bool(ok)
 
 
+def pending_background(sid: str) -> set[str]:
+    """Background task ids the arm started whose completion notification it hasn't consumed yet."""
+    started, consumed = set(), set()
+    for line in (TRANSCRIPTS / f"{sid}.jsonl").open():
+        started |= set(re.findall(r"running in background with ID: (\w+)", line))
+        # a delivered <task-notification> becomes a user message or a queued_command attachment
+        if '"type":"user"' in line or '"queued_command"' in line:
+            consumed |= set(re.findall(r"<task-id>(\w+)</task-id>", line))
+    return started - consumed
+
+
+_dg_busy = {"at": 0.0}
+
+
 def arm_done(sid: str, t0: float) -> bool:
     elapsed = time.time() - t0
     if elapsed > ARM_CAP:
         log(f"WARNING: arm {sid} hit the {ARM_CAP // 60} min cap")
         return True
+    # Run 2's first arm A was stopped in the gap between its Codex task finishing and its own
+    # watcher waking it, so both dg and the arm's background tasks must have been quiet for 3 min.
+    if "no tasks" not in sh("dg", "tasks", "running").stdout:
+        _dg_busy["at"] = time.time()
+        return False
     last, idle = last_turn(sid)
     if not (last and last["type"] == "assistant" and last["message"].get("stop_reason") == "end_turn"):
         return False
-    if "no tasks" not in sh("dg", "tasks", "running").stdout:
+    if time.time() - _dg_busy["at"] < 180 or pending_background(sid):
         return False
     rows = usage_rows(sid)
     if not rows or rows[-1]["ts"] < (TRANSCRIPTS / f"{sid}.jsonl").stat().st_mtime - 2:
@@ -178,5 +198,29 @@ def main() -> None:
     log("run 2 done")
 
 
+def rerun_a() -> None:
+    """Re-run arm A alone with fresh ids and its own bracket (R3 before, R4 after), after a 5 h reset if close."""
+    assert "no tasks" in sh("dg", "tasks", "running").stdout, "dg tasks are running"
+    assert {p.name for p in SITE.iterdir()} <= {"assets", ".DS_Store"}, "rin-website is not clean"
+    ids = json.loads((OUT / "session-ids.json").read_text())
+    ids |= {"R3": str(uuid.uuid4()), "A2r": str(uuid.uuid4()), "R4": str(uuid.uuid4())}
+    rl = reading("R3", ids["R3"])
+    left = rl["five_hour"]["resets_at"] - time.time()
+    if left < 100 * 60:
+        log(f"5h window resets in {left / 60:.0f} min, too close; waiting for the reset")
+        time.sleep(left + 180)
+        ids["R3"] = str(uuid.uuid4())
+        reading("R3", ids["R3"])
+    (OUT / "session-ids.json").write_text(json.dumps(ids, indent=2) + "\n")
+    arm("arm-a2r", "a", ids["A2r"])
+    time.sleep(120)
+    reading("R4", ids["R4"])
+    r = sh("python3", "measure.py", ids["A2r"], "--before", ids["R3"], "--after", ids["R4"])
+    (OUT / "arm-a.json").write_text(r.stdout or r.stderr)
+    bw = json.loads(r.stdout).get("bracketed_windows", {}) if r.stdout else {}
+    log(f"measure arm a (rerun): 5h {bw.get('five_hour')} 7d {bw.get('seven_day')}")
+    log("arm A rerun done")
+
+
 if __name__ == "__main__":
-    main()
+    rerun_a() if sys.argv[1:] == ["rerun-a"] else main()

@@ -1,0 +1,62 @@
+{
+  "session_id": "1ecfb531-6c9e-42e9-8eb9-452364ca0fbd",
+  "tokens": {
+    "input": 118,
+    "cache_write": 196875,
+    "cache_read": 7778230,
+    "output": 65452,
+    "processed": 8040675,
+    "generated": 262445,
+    "api_calls": 59
+  },
+  "wall_minutes": 17.6,
+  "tool_calls": {
+    "Bash": 39,
+    "Read": 33,
+    "Write": 4,
+    "WebFetch": 2,
+    "Edit": 1
+  },
+  "start": "2026-09-14T08:14:23.831Z",
+  "end": "2026-09-14T08:32:01.059Z",
+  "cost_usd": 7.5106,
+  "claude_windows": {
+    "five_hour": {
+      "start": 8,
+      "end": 12,
+      "delta": 4,
+      "window_reset_during_arm": false
+    },
+    "seven_day": {
+      "start": 11,
+      "end": 11,
+      "delta": 0,
+      "window_reset_during_arm": false
+    },
+    "snapshots": 158,
+    "raw_first": {
+      "five_hour": {
+        "used_percentage": 8,
+        "resets_at": 1789381200
+      },
+      "seven_day": {
+        "used_percentage": 11,
+        "resets_at": 1789707600
+      }
+    }
+  },
+  "bracketed_windows": {
+    "five_hour": {
+      "start": 8,
+      "end": 12,
+      "delta": 4,
+      "window_reset_during_arm": false
+    },
+    "seven_day": {
+      "start": 11,
+      "end": 11,
+      "delta": 0,
+      "window_reset_during_arm": false
+    }
+  }
+}

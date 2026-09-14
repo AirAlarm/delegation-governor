@@ -1,0 +1,27 @@
+10:36:18 {"ts": 1789371378.626146, "label": "run2-R0", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 7.000000000000001, "resetsAt": 1789381200}, "sevenDay": {"usedPercent": 11.0, "
+10:36:18 start session aa95fbc3-a809-4471-9c43-6f8dd4460fa4
+10:36:33 end session aa95fbc3-a809-4471-9c43-6f8dd4460fa4 after 0.2 min
+10:36:33 reading R0 (aa95fbc3-a809-4471-9c43-6f8dd4460fa4): {"five_hour": {"used_percentage": 7.000000000000001, "resets_at": 1789381200}, "seven_day": {"used_percentage": 11, "resets_at": 1789707600}}
+10:36:34 {"ts": 1789371394.3789818, "label": "arm-a2-start", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 7.000000000000001, "resetsAt": 1789381200}, "sevenDay": {"usedPercent": 1
+10:36:34 start session 6a016168-8d57-408d-abc9-8fe293fa8e4f
+11:12:04 end session 6a016168-8d57-408d-abc9-8fe293fa8e4f after 35.5 min
+11:12:05 {"ts": 1789373525.3593118, "label": "arm-a2-end", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 8.0, "resetsAt": 1789381200}, "sevenDay": {"usedPercent": 11.0, "resetsAt":
+11:12:05 check arm a: {"passed": 5, "total": 10}
+11:12:05 assets | archived to /Users/georgiy/Projects/rin-website-archive/a2
+11:14:06 {"ts": 1789373646.539634, "label": "run2-R1", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 8.0, "resetsAt": 1789381200}, "sevenDay": {"usedPercent": 11.0, "resetsAt": 178
+11:14:06 start session b3a086d2-524a-4377-8429-112a4397acf0
+11:14:22 end session b3a086d2-524a-4377-8429-112a4397acf0 after 0.3 min
+11:14:22 reading R1 (b3a086d2-524a-4377-8429-112a4397acf0): {"five_hour": {"used_percentage": 8, "resets_at": 1789381200}, "seven_day": {"used_percentage": 11, "resets_at": 1789707600}}
+11:14:23 {"ts": 1789373663.1128309, "label": "arm-b2-start", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 8.0, "resetsAt": 1789381200}, "sevenDay": {"usedPercent": 11.0, "resetsAt
+11:14:23 start session 1ecfb531-6c9e-42e9-8eb9-452364ca0fbd
+11:35:13 end session 1ecfb531-6c9e-42e9-8eb9-452364ca0fbd after 20.8 min
+11:35:13 {"ts": 1789374913.8808, "label": "arm-b2-end", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 12.0, "resetsAt": 1789381200}, "sevenDay": {"usedPercent": 11.0, "resetsAt": 1
+11:35:14 check arm b: {"passed": 7, "total": 10}
+11:35:14 assets | archived to /Users/georgiy/Projects/rin-website-archive/b2
+11:37:14 {"ts": 1789375034.9010618, "label": "run2-R2", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 12.0, "resetsAt": 1789381200}, "sevenDay": {"usedPercent": 11.0, "resetsAt": 1
+11:37:14 start session ce41867d-f008-40d4-8f34-7e25869cea76
+11:37:29 end session ce41867d-f008-40d4-8f34-7e25869cea76 after 0.2 min
+11:37:29 reading R2 (ce41867d-f008-40d4-8f34-7e25869cea76): {"five_hour": {"used_percentage": 12, "resets_at": 1789381200}, "seven_day": {"used_percentage": 11, "resets_at": 1789707600}}
+11:37:29 measure arm a: 5h {'start': 7.000000000000001, 'end': 8, 'delta': 0.9999999999999991, 'window_reset_during_arm': False} 7d {'start': 11, 'end': 11, 'delta': 0, 'window_reset_during_arm': False}
+11:37:29 measure arm b: 5h {'start': 8, 'end': 12, 'delta': 4, 'window_reset_during_arm': False} 7d {'start': 11, 'end': 11, 'delta': 0, 'window_reset_during_arm': False}
+11:37:29 run 2 done
