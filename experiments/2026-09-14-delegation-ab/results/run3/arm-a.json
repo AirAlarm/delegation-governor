@@ -1,0 +1,67 @@
+{
+  "session_id": "c2a9fbf9-41a6-4fc8-bd3c-b4ba3b91e532",
+  "tokens": {
+    "input": 262,
+    "cache_write": 266652,
+    "cache_read": 23717719,
+    "output": 103406,
+    "processed": 24088039,
+    "generated": 370320,
+    "api_calls": 129
+  },
+  "wall_minutes": 67.0,
+  "tool_calls": {
+    "Bash": 97,
+    "Read": 52,
+    "Write": 5,
+    "mcp__plugin_delegation-governor_dg-worker__run_dev_task": 5,
+    "ToolSearch": 3,
+    "mcp__plugin_delegation-governor_dg-worker__get_task_progress": 3,
+    "Skill": 1,
+    "WebFetch": 1,
+    "mcp__plugin_delegation-governor_dg-worker__provider_status": 1
+  },
+  "start": "2026-09-15T05:26:30.575Z",
+  "end": "2026-09-15T06:33:31.078Z",
+  "cost_usd": 18.4418,
+  "claude_windows": {
+    "five_hour": {
+      "start": 6,
+      "end": 11,
+      "delta": 5,
+      "window_reset_during_arm": false
+    },
+    "seven_day": {
+      "start": 25,
+      "end": 26,
+      "delta": 1,
+      "window_reset_during_arm": false
+    },
+    "snapshots": 265,
+    "raw_first": {
+      "five_hour": {
+        "used_percentage": 6,
+        "resets_at": 1789464000
+      },
+      "seven_day": {
+        "used_percentage": 25,
+        "resets_at": 1789707600
+      }
+    }
+  },
+  "bracketed_windows": {
+    "five_hour": {
+      "start": 6,
+      "end": 11,
+      "delta": 5,
+      "window_reset_during_arm": false
+    },
+    "seven_day": {
+      "start": 25,
+      "end": 26,
+      "delta": 1,
+      "window_reset_during_arm": false
+    }
+  },
+  "other_claude_activity": {}
+}

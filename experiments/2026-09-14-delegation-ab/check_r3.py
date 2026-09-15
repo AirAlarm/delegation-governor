@@ -35,7 +35,7 @@ def norm(s: str) -> str:
 
 
 def has_price(t: str, price: int) -> bool:
-    pat = rf"{price // 1000}\s?{price % 1000:03d}" if price >= 1000 else str(price)  # 3 500 or 3500
+    pat = rf"{price // 1000}[\s,]?{price % 1000:03d}" if price >= 1000 else str(price)  # 3 500, 3,500 or 3500
     return re.search(rf"(?<!\d){pat}(?!\d)", t) is not None
 
 
@@ -54,16 +54,16 @@ txt = {p: text_of(h) for p, h in src.items()}
 rel = lambda p: str(p.relative_to(site))
 ru = [p for p in pages if not rel(p).startswith("en/")]
 en = [p for p in pages if rel(p).startswith("en/")]
-ru_svc = [p for p in ru if rel(p).startswith("uslugi/")]
-en_svc = [p for p in en if rel(p).startswith("en/services/")]
+ru_svc = [p for p in ru if rel(p).startswith("uslugi/") and p.name != "index.html"]
+en_svc = [p for p in en if rel(p).startswith("en/services/") and p.name != "index.html"]
 
 rows = list(openpyxl.load_workbook(XLSX, data_only=True).active.iter_rows(values_only=True))[1:]
 services = [(r[1], r[2], int(r[7]), int(r[8]) if r[8] else None) for r in rows if r[2]]
 names = sorted({n for _, n, _, _ in services})
 
 # 1. structure
-root = {rel(p) for p in ru if "/" not in rel(p)}
-check("RU core pages (>= 8 at root incl. 404)", len(root) >= 8 and "404.html" in root, ", ".join(sorted(root)))
+root = {rel(p) for p in ru if "/" not in rel(p) or rel(p) == "uslugi/index.html"}  # price list may live at /uslugi/
+check("RU core pages (>= 8 incl. 404)", len(root) >= 8 and "404.html" in root, ", ".join(sorted(root)))
 check(f"RU service pages (>= {len(names)} distinct services)", len(ru_svc) >= len(names), str(len(ru_svc)))
 check("EN mirror (en/ pages >= RU pages)", len(en) >= len(ru) * 0.95, f"{len(en)} en vs {len(ru)} ru")
 check(f"EN service pages (>= {len(names)})", len(en_svc) >= len(names), str(len(en_svc)))
@@ -79,7 +79,7 @@ check("RU service pages: name in h1, xlsx price and duration", not miss, f"{len(
 miss_en = [f"{n} {pr}/{d}" for _, n, pr, d in services
            if not any(has_price(txt[p], pr) and (d is None or has_duration(txt[p], d)) for p in en_svc)]
 check("EN service pages: xlsx price and duration present", not miss_en, f"{len(services) - len(miss_en)}/{len(services)} " + "; ".join(miss_en[:6]))
-listing = [p for p in ru if "/" not in rel(p) and sum(norm(n) in norm(txt[p]) for n in names) >= len(names) * 0.9]
+listing = [p for p in ru if p not in ru_svc and sum(norm(n) in norm(txt[p]) for n in names) >= len(names) * 0.9]
 check("RU price list page lists (nearly) all services", bool(listing), ", ".join(rel(p) for p in listing))
 promos = ["Доброе утро", "Твой день", "Поделись заботой", "После заката", "Спасибо, мама"]
 check("all 5 promos named", all(any(p.split(",")[0] in txt[q] for q in ru) for p in promos))

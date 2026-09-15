@@ -1,0 +1,44 @@
+08:15:11 other Claude sessions active in the last 10 min: {'-Users-georgiy-Projects-delegation-governor/b3b35908-86bc-4629-b513-52758f644426.jsonl': 8}; waiting
+08:25:11 other Claude sessions active in the last 10 min: {'-Users-georgiy-Projects-delegation-governor/b3b35908-86bc-4629-b513-52758f644426.jsonl': 2}; waiting
+08:26:12 {"ts": 1789449972.9726028, "label": "run3-A3-before", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 8.0, "resetsAt": 1789399200}, "sevenDay": {"usedPercent": 13.0, "resets
+08:26:12 start session 779fb2e3-127e-475b-a90e-bf1e9bfcdb8f
+08:26:27 end session 779fb2e3-127e-475b-a90e-bf1e9bfcdb8f after 0.2 min
+08:26:27 reading A3-before (779fb2e3-127e-475b-a90e-bf1e9bfcdb8f): {"five_hour": {"used_percentage": 6, "resets_at": 1789464000}, "seven_day": {"used_percentage": 25, "resets_at": 1789707600}}
+08:26:28 {"ts": 1789449988.5365481, "label": "arm-arm-a3-start", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 6.0, "resetsAt": 1789464000}, "sevenDay": {"usedPercent": 25.0, "rese
+08:26:28 start session c2a9fbf9-41a6-4fc8-bd3c-b4ba3b91e532
+09:33:31 end session c2a9fbf9-41a6-4fc8-bd3c-b4ba3b91e532 after 67.0 min
+09:33:31 {"ts": 1789454011.8354409, "label": "arm-arm-a3-end", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 11.0, "resetsAt": 1789464000}, "sevenDay": {"usedPercent": 26.0, "reset
+09:33:32 check arm a: {"passed": 25, "total": 26}
+09:33:32 assets | archived to /Users/georgiy/Projects/rin-website-archive/arm-a3
+09:35:33 {"ts": 1789454133.216185, "label": "run3-A3-after", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 11.0, "resetsAt": 1789464000}, "sevenDay": {"usedPercent": 26.0, "resetsA
+09:35:33 start session 45e65f3e-c6fd-4ffd-9ea5-ce102c643261
+09:35:47 end session 45e65f3e-c6fd-4ffd-9ea5-ce102c643261 after 0.2 min
+09:35:47 reading A3-after (45e65f3e-c6fd-4ffd-9ea5-ce102c643261): {"five_hour": {"used_percentage": 11, "resets_at": 1789464000}, "seven_day": {"used_percentage": 26, "resets_at": 1789707600}}
+09:35:47 measure arm-a3: 5h {'start': 6, 'end': 11, 'delta': 5, 'window_reset_during_arm': False} cost 18.4418
+09:35:48 {"ts": 1789454148.8214881, "label": "run3-B3-before", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 11.0, "resetsAt": 1789464000}, "sevenDay": {"usedPercent": 26.0, "reset
+09:35:48 start session f200d8c4-f0d8-4b96-bd88-e2ca4f74dfee
+09:36:03 end session f200d8c4-f0d8-4b96-bd88-e2ca4f74dfee after 0.2 min
+09:36:03 reading B3-before (f200d8c4-f0d8-4b96-bd88-e2ca4f74dfee): {"five_hour": {"used_percentage": 11, "resets_at": 1789464000}, "seven_day": {"used_percentage": 26, "resets_at": 1789707600}}
+09:36:03 5h window: 164 min left, 11% used; waiting for the reset
+12:23:01 {"ts": 1789454148.8214881, "label": "run3-B3-before", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 11.0, "resetsAt": 1789464000}, "sevenDay": {"usedPercent": 26.0, "reset
+12:23:01 start session 1bc2abdb-fc54-4ff2-81bd-e59d549804ee
+12:28:01 FAIL: reading 1bc2abdb-fc54-4ff2-81bd-e59d549804ee got no rate_limits in 5 min
+12:28:06 end session 1bc2abdb-fc54-4ff2-81bd-e59d549804ee after 5.1 min
+12:28:06 reading B3-before (1bc2abdb-fc54-4ff2-81bd-e59d549804ee): null
+20:16:21 arm-a3 already measured; skipping
+20:16:22 {"ts": 1789492582.554817, "label": "run3-B3-before", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 0.0, "resetsAt": 1789482000}, "sevenDay": {"usedPercent": 26.0, "resetsA
+20:16:22 start session 1c48118d-e028-4648-b102-ec643f2c9dba
+20:16:37 end session 1c48118d-e028-4648-b102-ec643f2c9dba after 0.2 min
+20:16:37 reading B3-before (1c48118d-e028-4648-b102-ec643f2c9dba): {"five_hour": {"used_percentage": 0, "resets_at": 1789510200}, "seven_day": {"used_percentage": 26, "resets_at": 1789707600}}
+20:16:38 {"ts": 1789492598.522858, "label": "arm-arm-b3-start", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 0.0, "resetsAt": 1789510200}, "sevenDay": {"usedPercent": 26.0, "reset
+20:16:38 start session 0b328347-80a9-4224-b526-73d81e6f21b3
+20:52:14 end session 0b328347-80a9-4224-b526-73d81e6f21b3 after 35.6 min
+20:52:15 {"ts": 1789494735.861723, "label": "arm-arm-b3-end", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 7.000000000000001, "resetsAt": 1789510200}, "sevenDay": {"usedPercent": 
+20:52:16 check arm b: {"passed": 24, "total": 26}
+20:52:16 .DS_Store | assets | archived to /Users/georgiy/Projects/rin-website-archive/arm-b3
+20:54:17 {"ts": 1789494857.337318, "label": "run3-B3-after", "quota": {"claude": {"state": "CLAUDE_NORMAL", "fiveHour": {"usedPercent": 7.000000000000001, "resetsAt": 1789510200}, "sevenDay": {"usedPercent": 2
+20:54:17 start session 39f03ca6-7738-4599-ba09-7df6e57fdbe7
+20:54:32 end session 39f03ca6-7738-4599-ba09-7df6e57fdbe7 after 0.2 min
+20:54:32 reading B3-after (39f03ca6-7738-4599-ba09-7df6e57fdbe7): {"five_hour": {"used_percentage": 7.000000000000001, "resets_at": 1789510200}, "seven_day": {"used_percentage": 27, "resets_at": 1789707600}}
+20:54:32 measure arm-b3: 5h {'start': 0, 'end': 7.000000000000001, 'delta': 7.000000000000001, 'window_reset_during_arm': False} cost 12.7161
+20:54:32 round 3 done

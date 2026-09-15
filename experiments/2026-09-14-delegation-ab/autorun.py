@@ -293,11 +293,17 @@ def round3() -> None:
     assert "/0.7.4/" in dg_src, f"dg CLI runs {dg_src.strip()}, round 3 needs the 0.7.4 cache"
     assert "no tasks" in sh("dg", "tasks", "running").stdout, "dg tasks are running"
     assert {p.name for p in SITE.iterdir()} <= {"assets", ".DS_Store"}, "rin-website is not clean"
-    for a in ("arm-a3", "arm-b3"):
-        assert not (SITE.parent / "rin-website-archive" / a).exists(), f"archive {a} exists"
+    # The statusline logs usage with /usr/bin/python3; a pending Xcode license makes it fail silently.
+    assert subprocess.run(["/usr/bin/python3", "-c", "pass"], capture_output=True).returncode == 0, \
+        "/usr/bin/python3 fails (Xcode license?): run sudo xcodebuild -license accept"
 
-    ids: dict[str, str] = {}
+    ids_file = OUT / "session-ids.json"
+    ids: dict[str, str] = json.loads(ids_file.read_text()) if ids_file.exists() else {}
     for name, letter in (("arm-a3", "a"), ("arm-b3", "b")):
+        if (OUT / f"arm-{letter}.json").exists() and (SITE.parent / "rin-website-archive" / name).exists():
+            log(f"{name} already measured; skipping")  # resume after a stopped run
+            continue
+        assert not (SITE.parent / "rin-website-archive" / name).exists(), f"archive {name} exists without results"
         before, after, sid = f"{letter.upper()}3-before", f"{letter.upper()}3-after", str(uuid.uuid4())
         fresh_window(before, ids, need=ARM_CAP + 10 * 60)
         ids[name] = sid

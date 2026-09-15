@@ -1,0 +1,27 @@
+[PASS] RU core pages (>= 8 at root incl. 404) — 404.html, akcii.html, ceny.html, faq.html, galereya.html, index.html, kontakty.html, zapis.html
+[PASS] RU service pages (>= 34 distinct services) — 34
+[PASS] EN mirror (en/ pages >= RU pages) — 42 en vs 42 ru
+[PASS] EN service pages (>= 34) — 34
+[PASS] RU service pages: name in h1, xlsx price and duration — 37/37 
+[FAIL] EN service pages: xlsx price and duration present — 3/37 Ламинирование ресниц 3200/None; Окрашивание ресниц 1200/None; Осветление бровей 3000/None; Окрашивание бровей 1300/None; Коррекция бровей 1300/None; Органик бровей 3500/None
+[PASS] RU price list page lists (nearly) all services — ceny.html, zapis.html
+[PASS] all 5 promos named
+[PASS] contacts present
+[PASS] booking form in RU and EN listing all services — en/booking.html=38, zapis.html=38
+[PASS] unique non-empty <title> on every page — 0 duplicates
+[PASS] meta description on every page
+[PASS] Open Graph tags on every page
+[PASS] hreflang on every page — 82/82
+[PASS] sitemap.xml covers every page — 82/82
+[PASS] robots.txt present
+[PASS] JSON-LD for the business on the home page
+[PASS] parseable JSON-LD on every service page — 68/68
+[PASS] one <h1> per page
+[PASS] lang + viewport on every page
+[PASS] every <img> has alt
+[PASS] all local links/assets resolve — 0 missing: 
+[PASS] initial load under 2 MB per page (eager img/css/js/video)
+[PASS] no autoplay video over 2 MB
+[PASS] tools/check.py exists and exits 0 — exit 0
+[PASS] committed, assets/ not tracked — 219 files
+{"passed": 25, "total": 26}

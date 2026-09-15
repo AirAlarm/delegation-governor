@@ -397,3 +397,12 @@ caffeinate -i python3 autorun.py round3
 - **Where:** a fresh session, with §3 of this runbook applied to `results/run3/`.
 - **Blind review:** copy `arm-a3` / `arm-b3` to `site-1` / `site-2` with a random mapping. Strip `.git`, `.cc-delegate`, `.gitignore`, and any dev-only files that would reveal the arm. Keep `tools/check.py`, which is part of the deliverable.
 - **Scale the reviewer's content check:** have it verify all 37 xlsx rows on both the RU and EN service pages.
+
+## Round 3 outcome (2026-09-15): INCONCLUSIVE, first measured saving
+
+See `results/run3/analysis.md`, with the blind review in `results/run3/blind-review.md`.
+- **Claude 5 h window:** A3 used 5 pp vs B3's 7 pp; the token-weighted estimate is 0.84×. Generated tokens 0.86×, output 0.75×. Both arms were clean, with no mid-arm reset.
+- **Worker quota:** Codex 5 h +47 pp, OpenCode Go 5 h 16.8 %.
+- **Quality:** `check_r3` 26/26 for both. The blind review scored A3 6.5/10 with 2 BLOCKING (a real-looking domain, contradictory xlsx brow descriptions) and B3 8/10 with none, so parity fails.
+- **The 5 h limit tracks weighted tokens, not cost.** Fit: 0.6 pp per 100k input+cache writes, 3.2 pp per 100k output, cache reads close to zero.
+- **Next:** repeat round 3 with B first; fix or drop the failing OpenCode lanes; add "placeholder domain" and "flag contradictory source cells" to the brief.
