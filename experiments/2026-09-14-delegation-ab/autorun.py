@@ -289,7 +289,7 @@ def round3() -> None:
     installed = [i.get("version") for i in plugins["plugins"].get("delegation-governor@delegation-governor-marketplace", [])]
     assert installed == ["0.7.4"], f"delegation-governor plugin is {installed}, round 3 needs 0.7.4"
     dg_py = Path(sh("sh", "-c", "head -1 \"$(command -v dg)\"").stdout[2:].strip())
-    dg_src = subprocess.run([str(dg_py), "-c", "import dg; print(dg.__file__)"], capture_output=True, text=True).stdout
+    dg_src = subprocess.run([str(dg_py), "-c", "import dg.cli; print(dg.cli.__file__)"], capture_output=True, text=True).stdout
     assert "/0.7.4/" in dg_src, f"dg CLI runs {dg_src.strip()}, round 3 needs the 0.7.4 cache"
     assert "no tasks" in sh("dg", "tasks", "running").stdout, "dg tasks are running"
     assert {p.name for p in SITE.iterdir()} <= {"assets", ".DS_Store"}, "rin-website is not clean"
